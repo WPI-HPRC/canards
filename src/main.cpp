@@ -20,8 +20,8 @@
 
 
 // #define SENSOR_DEBUG
-#define SENSOR_PRINT
-// #define RADIO_DEBUG
+// #define SENSOR_PRINT
+#define RADIO_DEBUG
 
 
 // initialize our sensor buses 
@@ -103,13 +103,16 @@ void setup()
   // SerialUSB.println(encoder1.begin());
   // servo1.attach(PWM_OUT3);
 
+  pinMode(MOSFET_GATE, OUTPUT);
+
+  digitalWrite(MOSFET_GATE, HIGH);
 
 
 
   
   
   sensorInit();
-  // radioInit();
+  radioInit();
 }
 
 unsigned long long counterBufferNotEmpty = 0;
@@ -118,15 +121,19 @@ void loop()
   digitalToggle(LED_GREEN);
 
   
-  hprc::Sensors sensors = sensorUpdate();
-  // radioUpdate();
+  // hprc::Sensors sensors = sensorUpdate();
+  radioUpdate();
 
-  flatbuffers::FlatBufferBuilder builder;
+  // flatbuffers::FlatBufferBuilder builder;
 
-  auto packet = hprc::CreateSensorPacket(builder, &sensors);
+  // auto packet = hprc::CreateSensorPacket(builder, &sensors);
 
-  builder.Finish(packet);
+  // builder.Finish(packet);
   // we can now transmit the packet
+
+  // SerialUSB.println(String(analogRead(MOSFET_CURRENT)));
+
+
 
 
 
