@@ -1,0 +1,3 @@
+pio run -e marsv21 -t listlogs               # what's on the card
+pio run -e marsv21 -t dumplog                # previous boot's log
+LOG_INDEX=7 pio run -e marsv21 -t dumplog    # /logs/canardsLog7.csv
