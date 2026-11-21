@@ -1,0 +1,14 @@
+2026-11-20T23:33:50.191  connected to /dev/ttyACM0
+2026-11-20T23:35:14.525  logging columns to telemetry.csv
+2026-11-20T23:35:14.525  header: 19 columns
+2026-11-20T23:36:03.684  sent actuatorTest
+2026-11-20T23:36:15.875  sent actuatorTest
+2026-11-20T23:36:16.095  reply: actuatorTest -> OK
+2026-11-20T23:36:23.400  sent armFlight
+2026-11-20T23:36:28.735  sent armFlight
+2026-11-20T23:36:28.988  reply: armFlight -> OK
+2026-11-20T23:36:32.291  sent actuatorTest
+2026-11-20T23:36:32.546  reply: actuatorTest -> REJECTED
+2026-11-20T23:36:35.850  sent armFlight
+2026-11-20T23:36:39.557  sent armFlight
+2026-11-20T23:39:01.383  disconnected
