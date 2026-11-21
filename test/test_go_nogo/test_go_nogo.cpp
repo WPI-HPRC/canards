@@ -37,7 +37,7 @@ void test_each_failure_sets_its_own_bit() {
   };
   const Case cases[] = {
       {[](GoNoGo::Inputs& in) { in.inPreFlight = false; }, GoNoGo::kNotPreFlight},
-      {[](GoNoGo::Inputs& in) { in.greetingRunning = true; }, GoNoGo::kGreeting},
+      {[](GoNoGo::Inputs& in) { in.greetingRunning = true; }, GoNoGo::kActuationRoutine},
       {[](GoNoGo::Inputs& in) { in.attitudeValid = false; }, GoNoGo::kNavNotReady},
       {[](GoNoGo::Inputs& in) { in.altitudeValid = false; }, GoNoGo::kNavNotReady},
       {[](GoNoGo::Inputs& in) { in.baroOk = false; }, GoNoGo::kSensorDown},

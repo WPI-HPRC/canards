@@ -166,7 +166,7 @@ SIMULATED_PORT = "SIMULATED"
 # GNC GO / NO-GO: the flight program's "gnc_go" and "nogo" columns. The bits
 # must match src/Safety/GoNoGo.h.
 NOGO_REASONS = [
-    (1, "not armed"), (2, "greeting running"), (4, "nav not ready"), (8, "sensor/SD down"),
+    (1, "not armed"), (2, "canard actuation routine"), (4, "nav not ready"), (8, "sensor/SD down"),
     (16, "safety fault"), (32, "canards not ready"), (64, "tilted"), (128, "encoder bad"),
 ]
 

@@ -14,7 +14,7 @@ namespace GoNoGo {
 // The reasons, as bits of nogo().
 enum : uint16_t {
   kNotPreFlight = 1,     // not armed (armFlight puts it in PreFlight)
-  kGreeting = 2,         // the PreFlight Morse greeting is still running
+  kActuationRoutine = 2, // the PreFlight canard actuation routine (Morse) is still running
   kNavNotReady = 4,      // IMU, attitude, speed or altitude not valid (alignment not done)
   kSensorDown = 8,       // IMU, magnetometer, barometer or SD log not OK
   kSafetyFault = 16,     // any sticky safety fault since boot
@@ -37,7 +37,7 @@ struct Inputs {
 inline uint16_t nogo(const Inputs& in) {
   uint16_t bits = 0;
   if (!in.inPreFlight) bits |= kNotPreFlight;
-  if (in.greetingRunning) bits |= kGreeting;
+  if (in.greetingRunning) bits |= kActuationRoutine;
   if (!(in.imuValid && in.attitudeValid && in.speedValid && in.altitudeValid)) bits |= kNavNotReady;
   if (!(in.imuOk && in.magOk && in.baroOk && in.sdOk)) bits |= kSensorDown;
   if (in.safetySticky != 0) bits |= kSafetyFault;
