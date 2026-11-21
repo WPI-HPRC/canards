@@ -51,6 +51,13 @@ class GroundCommands final : public CommandSource {
   // queued then).
   GroundReply handle(const char* name, StateId state, bool sweepActive);
 
+  // Bench identification (the USB console's "canard" and "jitter"): hold
+  // canard `canard` (0..3) at `angleRad` for FlightConfig::kGroundTestHoldUs,
+  // or (Stop) back to neutral. On the ground only (Init, PreFlight); the
+  // Canards subsystem still applies its own limits.
+  GroundReply handleCanardTest(StateId state, int canard, float angleRad);
+  GroundReply handleCanardTestStop(StateId state);
+
   // The command name in one line typed on the USB bench console
   // (Platform/UsbConsole.h), in place: either the radio form "$C,<name>*XX"
   // (checksum checked, as in telemetry.cpp) or the bare name. Leading and

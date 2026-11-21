@@ -1,6 +1,9 @@
 #include "Subsystems/Comms/GroundCommands.h"
 
+#include <cmath>
 #include <cstring>
+
+#include "Actuators.h"  // kNumCanards
 
 namespace {
 
@@ -56,6 +59,22 @@ const char* GroundCommands::commandFromLine(char* line) {
   *star = '\0';
   if (std::strncmp(line + 1, "C,", 2) != 0) return nullptr;
   return line + 3;
+}
+
+GroundReply GroundCommands::handleCanardTest(StateId state, int canard, float angleRad) {
+  if (!isGroundState(state) || canard < 0 || canard >= kNumCanards || !std::isfinite(angleRad)) {
+    return GroundReply::Rejected;
+  }
+  Command c = make(CommandType::CanardTest);
+  c.canard = static_cast<int8_t>(canard);
+  c.angleRad = angleRad;
+  return push(&c, 1) ? GroundReply::Ok : GroundReply::Rejected;
+}
+
+GroundReply GroundCommands::handleCanardTestStop(StateId state) {
+  if (!isGroundState(state)) return GroundReply::Rejected;
+  const Command c = make(CommandType::CanardTestStop);
+  return push(&c, 1) ? GroundReply::Ok : GroundReply::Rejected;
 }
 
 bool GroundCommands::push(const Command* commands, size_t n) {

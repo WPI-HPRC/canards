@@ -401,6 +401,98 @@ bool runCycle() {
   return true;
 }
 
+// --- Canard identification (USB console, on the ground only) -----------------------
+//   canard <which> <deg>   hold one canard at <deg> for 5 s (kGroundTestHoldUs)
+//   canard off             all back to neutral now
+//   jitter <which>         wiggle one canard +/- kJitterDeg for kJitterCycles
+// <which> is 1-4 or the body axis the canard sits on: +y, +z, -y, -z.
+// Canard 1..4 = CH1 (+y), CH3 (+z), CH4 (-y), CH2 (-z): include/VehicleConfig.h.
+constexpr const char* kCanardAxis[kNumCanards] = {"+y", "+z", "-y", "-z"};
+constexpr const char* kCanardChannel[kNumCanards] = {"CH1", "CH3", "CH4", "CH2"};
+constexpr float kJitterDeg = 3.0f;
+constexpr int kJitterCycles = 6;                 // 6 x (+, -) = 12 moves
+constexpr uint32_t kJitterStepMs = 250;
+
+struct Jitter {
+  int canard = -1;   // -1: none running
+  int step = 0;
+  uint32_t lastMs = 0;
+};
+Jitter jitter;
+
+// 0..3 from "1".."4" or "+y" / "+z" / "-y" / "-z"; -1 if neither.
+int parseCanard(const char* word) {
+  if (word == nullptr) return -1;
+  if (word[0] >= '1' && word[0] <= '4' && word[1] == '\0') return word[0] - '1';
+  for (int i = 0; i < kNumCanards; ++i) {
+    if (strcmp(word, kCanardAxis[i]) == 0) return i;
+  }
+  return -1;
+}
+
+// Handles "canard ..." and "jitter ...". False if `name` is neither.
+bool handleCanardCommand(const char* name) {
+  const bool isCanard = strncmp(name, "canard", 6) == 0 && (name[6] == ' ' || name[6] == '\0');
+  const bool isJitter = strncmp(name, "jitter", 6) == 0 && (name[6] == ' ' || name[6] == '\0');
+  if (!isCanard && !isJitter) return false;
+
+  char buf[64];
+  strncpy(buf, name, sizeof buf - 1);
+  buf[sizeof buf - 1] = '\0';
+  strtok(buf, " \t");
+  const char* which = strtok(nullptr, " \t");
+  const char* deg = strtok(nullptr, " \t");
+
+  if (isCanard && which != nullptr && strcmp(which, "off") == 0) {
+    jitter.canard = -1;
+    const bool ok = ground.handleCanardTestStop(flight.state()) == GroundReply::Ok;
+    SerialUSB.println(ok ? "# canards to neutral" : "---ERROR canard off refused (not on the ground)---");
+    return true;
+  }
+  const int c = parseCanard(which);
+  if (c < 0 || (isCanard && deg == nullptr)) {
+    SerialUSB.println("---ERROR usage: canard <1-4|+y|+z|-y|-z> <deg> | canard off | jitter <1-4|+y|+z|-y|-z>---");
+    return true;
+  }
+  if (isJitter) {
+    jitter.canard = c;
+    jitter.step = 0;
+    jitter.lastMs = millis() - kJitterStepMs;  // first move now
+    SerialUSB.printf("# jitter canard %d (%s, %s): +/-%.0f deg\n", c + 1, kCanardAxis[c], kCanardChannel[c],
+                     kJitterDeg);
+    return true;
+  }
+  char* end = nullptr;
+  const float angleDeg = strtof(deg, &end);
+  if (end == deg || *end != '\0' || !(fabsf(angleDeg) <= FlightConfig::kGroundTestLimitRad / FlightConfig::kDegToRad)) {
+    SerialUSB.printf("---ERROR angle must be a number within +/-%.1f deg---\n",
+                     FlightConfig::kGroundTestLimitRad / FlightConfig::kDegToRad);
+    return true;
+  }
+  jitter.canard = -1;
+  if (ground.handleCanardTest(flight.state(), c, angleDeg * FlightConfig::kDegToRad) != GroundReply::Ok) {
+    SerialUSB.println("---ERROR canard test refused (only in Init or PreFlight)---");
+    return true;
+  }
+  SerialUSB.printf("# canard %d (%s, %s) to %.1f deg for 5 s; positive = leading edge clockwise from the tail\n",
+                   c + 1, kCanardAxis[c], kCanardChannel[c], angleDeg);
+  return true;
+}
+
+// Runs the jitter, one move per kJitterStepMs, then back to neutral.
+void updateJitter() {
+  if (jitter.canard < 0 || millis() - jitter.lastMs < kJitterStepMs) return;
+  jitter.lastMs = millis();
+  if (jitter.step >= 2 * kJitterCycles || !isGroundState(flight.state())) {
+    ground.handleCanardTestStop(flight.state());
+    jitter.canard = -1;
+    return;
+  }
+  const float deg = (jitter.step % 2 == 0) ? kJitterDeg : -kJitterDeg;
+  ground.handleCanardTest(flight.state(), jitter.canard, deg * FlightConfig::kDegToRad);
+  ++jitter.step;
+}
+
 // --- USB bench console (Flight mode) -----------------------------------------------
 // One command per line over USB: the ground-station commands, bare
 // ("armFlight") or in the radio form ("$C,armFlight*29"), with the same rules
@@ -420,6 +512,8 @@ void handleConsoleLine(char* line) {
     case GroundReply::Rejected: console.reply(stable, "REJECTED"); return;
     case GroundReply::Unknown: break;
   }
+
+  if (handleCanardCommand(name)) return;
 
   // "replay <N> [servos] [fast]": restart into an SD replay (the ground
   // station's SD replay panel). Init before arming only, like log download.
@@ -479,6 +573,7 @@ void loopFlight() {
   static char consoleLine[64];
   if (usbLines.readLine(consoleLine, sizeof consoleLine)) handleConsoleLine(consoleLine);
   console.update(millis(), SerialUSB.dtr());
+  updateJitter();
 
   if (flight.state() != StateId::Init && !watchdogRunning) {
     IWatchdog.begin(FlightConfig::kWatchdogTimeoutUs);
