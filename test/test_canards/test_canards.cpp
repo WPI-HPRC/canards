@@ -395,6 +395,9 @@ static void test_denials_accumulate_and_last_denied_follows_the_latest() {
   TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
   EXPECT_LAST_DENIED(CanardRequest::TestAngles, rig, "1");
 
+  // Past the Control -> Coast cycle (whose hold would be exempt), a hold in
+  // Coast is a denial.
+  rig.step(StateId::Coast);
   rig.stepHold(StateId::Coast);
   TEST_ASSERT_EQUAL_UINT32(2, rig.status().deniedCount);
   EXPECT_LAST_DENIED(CanardRequest::AttitudeHold, rig, "2");
@@ -425,17 +428,89 @@ static void test_a_request_lasts_one_cycle() {
   TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates);
 }
 
-static void test_test_angles_on_the_launch_cycle_are_refused() {
-  Rig rig;
-  rig.enterEnabled(StateId::PreFlight);
-  rig.stepTest(StateId::PreFlight);
-  EXPECT_MODE(CanardMode::Testing, rig, "testing");
-  // PreFlight asked again, but launch was detected this cycle: the state in
-  // force is Boost.
-  rig.stepTest(StateId::Boost);
-  TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
-  EXPECT_LAST_DENIED(CanardRequest::TestAngles, rig, "launch cycle");
-  EXPECT_POWERED_NEUTRAL(rig, "launch cycle");
+static void test_test_angles_on_the_launch_cycle_end_at_neutral_uncounted() {
+  const StateId ground[] = {StateId::Init, StateId::PreFlight};
+  for (StateId s : ground) {
+    Rig rig;
+    rig.step(s);
+    rig.stepTest(s);
+    EXPECT_MODE(CanardMode::Testing, rig, stateName(s));
+    // The ground state asked again, but launch was detected this cycle: the
+    // state in force is Boost. Neutral, but it was the old state's request.
+    rig.stepTest(StateId::Boost);
+    TEST_ASSERT_EQUAL_UINT8(u8(CanardRequest::TestAngles), u8(rig.status().request));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, rig.status().deniedCount, stateName(s));
+    EXPECT_LAST_DENIED(CanardRequest::None, rig, stateName(s));
+    EXPECT_POWERED_NEUTRAL(rig, stateName(s));
+    // Asked again in Boost itself: a denial.
+    rig.stepTest(StateId::Boost);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, rig.status().deniedCount, stateName(s));
+    EXPECT_LAST_DENIED(CanardRequest::TestAngles, rig, stateName(s));
+    EXPECT_POWERED_NEUTRAL(rig, stateName(s));
+  }
+}
+
+// On the cycle the state changes, a request the OLD state was allowed to make
+// ends at neutral without a denial; one neither state allows is still counted.
+static void test_transition_cycle_exempts_only_the_old_states_allowed_request() {
+  {  // Control's last hold, on Control -> Coast: exempt.
+    Rig rig;
+    rig.readyToControl();
+    rig.stepHold(StateId::Control);
+    EXPECT_MODE(CanardMode::Controlling, rig, "control");
+    rig.controller.clearLog();
+    rig.stepHold(StateId::Coast);
+    TEST_ASSERT_EQUAL_UINT8(u8(CanardRequest::AttitudeHold), u8(rig.status().request));
+    TEST_ASSERT_EQUAL_UINT32(0, rig.status().deniedCount);
+    EXPECT_LAST_DENIED(CanardRequest::None, rig, "control -> coast");
+    TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates);
+    TEST_ASSERT_EQUAL_UINT32(0, rig.controller.callCount());
+    EXPECT_POWERED_NEUTRAL(rig, "control -> coast");
+  }
+  {  // Control's last hold, straight into Chute: exempt, and unpowered.
+    Rig rig;
+    rig.readyToControl();
+    rig.stepHold(StateId::Control);
+    rig.stepHold(StateId::Chute);
+    TEST_ASSERT_EQUAL_UINT32(0, rig.status().deniedCount);
+    EXPECT_OFF(rig, "control -> chute");
+  }
+  {  // Test angles on Boost -> Control: neither allows them.
+    Rig rig;
+    rig.enterEnabled(StateId::Boost);
+    rig.stepTest(StateId::Control);
+    TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
+    EXPECT_LAST_DENIED(CanardRequest::TestAngles, rig, "boost -> control");
+    EXPECT_POWERED_NEUTRAL(rig, "boost -> control");
+  }
+  {  // A hold on Boost -> Coast or Coast -> Chute: neither allows it.
+    Rig rig;
+    rig.enterEnabled(StateId::Boost);
+    rig.stepHold(StateId::Coast);
+    TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
+    EXPECT_LAST_DENIED(CanardRequest::AttitudeHold, rig, "boost -> coast");
+    rig.stepHold(StateId::Chute);
+    TEST_ASSERT_EQUAL_UINT32(2, rig.status().deniedCount);
+    EXPECT_OFF(rig, "coast -> chute");
+  }
+  {  // A hold on Init -> PreFlight: neither allows it.
+    Rig rig;
+    rig.step(StateId::Init);
+    rig.stepHold(StateId::PreFlight);
+    TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
+    EXPECT_LAST_DENIED(CanardRequest::AttitudeHold, rig, "init -> preflight");
+  }
+  {  // A conflict on a transition cycle is always counted.
+    Rig rig;
+    rig.readyToControl();
+    rig.stepHold(StateId::Control);
+    rig.stepWith(StateId::Coast, [](Canards& c) {
+      c.requestAttitudeHold(reference());
+      c.requestNeutral();
+    });
+    TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
+    EXPECT_LAST_DENIED(CanardRequest::Conflict, rig, "conflict");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +575,8 @@ static void test_gate_not_enabled() {
   rig.step(StateId::Boost);
   rig.stepHold(StateId::Control);
   EXPECT_GATED(rig, CanardGate::kNotEnabled, 0);
-  EXPECT_OFF(rig, "never enabled");
+  // Not enabled is not unpowered: holding zero.
+  EXPECT_POWERED_NEUTRAL(rig, "never enabled");
   TEST_ASSERT_FALSE(rig.status().enabled);
 }
 
@@ -513,7 +589,8 @@ static void test_gate_not_enabled_after_disable_in_flight() {
   rig.disable(StateId::Control);
   rig.stepHold(StateId::Control);
   EXPECT_GATED(rig, CanardGate::kNotEnabled, 0);
-  EXPECT_OFF(rig, "disabled");
+  EXPECT_POWERED_NEUTRAL(rig, "disabled");
+  TEST_ASSERT_FALSE(rig.status().enabled);
 }
 
 static void test_gate_locked_out() {
@@ -526,6 +603,24 @@ static void test_gate_locked_out() {
   EXPECT_MODE(CanardMode::Neutral, rig, "locked out");
   TEST_ASSERT_TRUE(rig.status().lockedOut);
   TEST_ASSERT_TRUE(rig.out.servoPower);
+}
+
+static void test_a_locked_out_rocket_is_powered_at_zero_in_control() {
+  const bool enabledOnThePad[] = {true, false};
+  for (bool enabled : enabledOnThePad) {
+    Rig rig;
+    if (enabled) rig.enable(StateId::Init);
+    rig.step(StateId::Init);
+    rig.step(StateId::Boost);  // launched from Init
+    const uint16_t gates = CanardGate::kLockedOut | (enabled ? 0 : CanardGate::kNotEnabled);
+    for (int i = 0; i < 20; ++i) {
+      rig.stepHold(StateId::Control);
+      EXPECT_GATED(rig, gates, 0);
+      EXPECT_POWERED_NEUTRAL(rig, enabled ? "locked out, enabled" : "locked out, disabled");
+      TEST_ASSERT_TRUE(rig.status().lockedOut);
+      TEST_ASSERT_EQUAL(enabled, rig.status().enabled);
+    }
+  }
 }
 
 static void test_gate_safety_fault() {
@@ -675,6 +770,25 @@ static void test_test_angles_are_clamped_to_the_ground_test_limit() {
   }
 }
 
+static void test_test_angles_act_without_enable() {
+  const StateId ground[] = {StateId::Init, StateId::PreFlight};
+  for (StateId s : ground) {
+    Rig rig;
+    rig.stepTest(s);
+    TEST_ASSERT_FALSE_MESSAGE(rig.status().enabled, stateName(s));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, rig.status().deniedCount, stateName(s));
+    EXPECT_MODE(CanardMode::Testing, rig, stateName(s));
+    EXPECT_COMMAND(rig, kTestAngles, stateName(s));
+    // And after a disable.
+    rig.enable(s);
+    rig.disable(s);
+    rig.stepTest(s);
+    TEST_ASSERT_FALSE_MESSAGE(rig.status().enabled, stateName(s));
+    EXPECT_MODE(CanardMode::Testing, rig, stateName(s));
+    EXPECT_COMMAND(rig, kTestAngles, stateName(s));
+  }
+}
+
 static void test_a_non_finite_test_angle_makes_the_request_neutral() {
   const float badValues[] = {kNaN, kInf, -kInf};
   for (float bad : badValues) {
@@ -709,38 +823,150 @@ static void test_a_safety_fault_forces_test_angles_to_neutral() {
 // Envelope cut-off
 // ---------------------------------------------------------------------------
 
-static void test_cutoff_latches_on_tilt() {
+// Rounds a duration up to whole cycles of the rig.
+constexpr uint64_t ceilToStep(uint64_t us) { return (us + kStepUs - 1) / kStepUs * kStepUs; }
+// Consecutive outside-the-envelope attitude-hold cycles that latch the
+// cut-off: the first, then every cycle up to kCutoffHoldUs after it.
+constexpr uint64_t kCutoffSamples = ceilToStep(FlightConfig::kCutoffHoldUs) / kStepUs + 1;
+static_assert(kCutoffSamples >= 2, "the debounce tests need a hold of at least one cycle");
+
+// Outside the envelope: what the estimator reports.
+struct Outside {
+  Quat attitude;
+  Vec3 bodyRate;
+  const char* what;
+};
+
+static void setOutside(Rig& rig, const Outside& o) {
+  rig.estimator.output.attitude = o.attitude;
+  rig.estimator.output.bodyRate = o.bodyRate;
+}
+
+// `n` attitude-hold cycles in Control, outside the envelope and not latched:
+// the canards keep controlling.
+static void holdOutsideAt(int line, Rig& rig, const Outside& o, uint64_t n) {
+  setOutside(rig, o);
+  for (uint64_t i = 0; i < n; ++i) {
+    rig.stepHold(StateId::Control);
+    UNITY_TEST_ASSERT(!rig.status().cutoffLatched, line, o.what);
+    UNITY_TEST_ASSERT_EQUAL_UINT8(u8(CanardMode::Controlling), u8(rig.status().mode), line, o.what);
+    UNITY_TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates, line, o.what);
+  }
+}
+#define HOLD_OUTSIDE(rig, o, n) holdOutsideAt(__LINE__, (rig), (o), (n))
+
+// The next outside cycle latches.
+static void expectLatchesNextAt(int line, Rig& rig, const Outside& o) {
+  setOutside(rig, o);
+  rig.controller.clearLog();
+  rig.stepHold(StateId::Control);
+  UNITY_TEST_ASSERT(rig.status().cutoffLatched, line, o.what);
+  UNITY_TEST_ASSERT_EQUAL_HEX16(CanardGate::kCutoff, rig.status().gates, line, o.what);
+  UNITY_TEST_ASSERT_EQUAL_UINT32(0, rig.controller.callCount(), line, o.what);
+  expectNeutralAt(line, rig, o.what);
+  UNITY_TEST_ASSERT_EQUAL_UINT8(u8(CanardMode::Neutral), u8(rig.status().mode), line, o.what);
+}
+#define EXPECT_LATCHES_NEXT(rig, o) expectLatchesNextAt(__LINE__, (rig), (o))
+
+// One sample short of the hold does not latch; the full hold does, exactly
+// kCutoffHoldUs (rounded up to a cycle) after the first outside sample.
+static void expectCutoffDebouncedAt(int line, const Outside& o) {
   Rig rig;
   rig.readyToControl();
-  rig.estimator.output.attitude = noseUpTilted(FlightConfig::kMaxTiltRad + 0.05f);
+  const uint64_t firstOutsideUs = rig.timeUs + kStepUs;
+  holdOutsideAt(line, rig, o, kCutoffSamples - 1);
+  expectLatchesNextAt(line, rig, o);
+  UNITY_TEST_ASSERT_EQUAL_UINT64(firstOutsideUs + ceilToStep(FlightConfig::kCutoffHoldUs), rig.timeUs, line,
+                                 o.what);
+}
+#define EXPECT_CUTOFF_DEBOUNCED(o) expectCutoffDebouncedAt(__LINE__, (o))
+
+const Vec3 kGoodRate{0.4f, 0.3f, -0.2f};
+const float kOverRate = FlightConfig::kMaxPitchYawRate + 0.1f;
+
+static Outside tilted() { return {noseUpTilted(FlightConfig::kMaxTiltRad + 0.05f), kGoodRate, "tilt"}; }
+
+static void test_cutoff_latches_on_tilt_after_its_hold() { EXPECT_CUTOFF_DEBOUNCED(tilted()); }
+
+static void test_cutoff_latches_on_pitch_rate_either_sign_after_its_hold() {
+  EXPECT_CUTOFF_DEBOUNCED((Outside{noseUpTilted(0.1f), Vec3{0.0f, kOverRate, 0.0f}, "+pitch"}));
+  EXPECT_CUTOFF_DEBOUNCED((Outside{noseUpTilted(0.1f), Vec3{0.0f, -kOverRate, 0.0f}, "-pitch"}));
+}
+
+static void test_cutoff_latches_on_yaw_rate_either_sign_after_its_hold() {
+  EXPECT_CUTOFF_DEBOUNCED((Outside{noseUpTilted(0.1f), Vec3{0.0f, 0.0f, kOverRate}, "+yaw"}));
+  EXPECT_CUTOFF_DEBOUNCED((Outside{noseUpTilted(0.1f), Vec3{0.0f, 0.0f, -kOverRate}, "-yaw"}));
+}
+
+static void test_cutoff_run_switching_between_limits_is_one_run() {
+  // Tilt, then pitch rate, then yaw rate: still continuously outside.
+  const Outside pitch{noseUpTilted(0.1f), Vec3{0.0f, kOverRate, 0.0f}, "pitch"};
+  const Outside yaw{noseUpTilted(0.1f), Vec3{0.0f, 0.0f, -kOverRate}, "yaw"};
+  Rig rig;
+  rig.readyToControl();
+  for (uint64_t i = 0; i + 1 < kCutoffSamples; ++i) {
+    HOLD_OUTSIDE(rig, i % 3 == 0 ? tilted() : (i % 3 == 1 ? pitch : yaw), 1);
+  }
+  EXPECT_LATCHES_NEXT(rig, tilted());
+}
+
+static void test_cutoff_run_restarts_after_a_cycle_inside_the_envelope() {
+  Rig rig;
+  rig.readyToControl();
+  HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+  scriptGoodFlight(rig.estimator);
   rig.stepHold(StateId::Control);
-  TEST_ASSERT_TRUE(rig.status().cutoffLatched);
-  EXPECT_GATED(rig, CanardGate::kCutoff, 0);
-  EXPECT_MODE(CanardMode::Neutral, rig, "tilt");
+  TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+  EXPECT_MODE(CanardMode::Controlling, rig, "inside");
+  HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+  EXPECT_LATCHES_NEXT(rig, tilted());
 }
 
-static void test_cutoff_latches_on_pitch_rate_either_sign() {
-  const float signs[] = {1.0f, -1.0f};
-  for (float sign : signs) {
+static void test_cutoff_run_restarts_after_a_hold_without_a_valid_attitude() {
+  Rig rig;
+  rig.readyToControl();
+  HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+  rig.estimator.output.attitudeValid = false;  // still tilted, but not to be believed
+  rig.controller.clearLog();
+  rig.stepHold(StateId::Control);
+  TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+  EXPECT_GATED(rig, CanardGate::kNavInvalid, 0);
+  rig.estimator.output.attitudeValid = true;
+  HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+  EXPECT_LATCHES_NEXT(rig, tilted());
+}
+
+static void test_cutoff_run_restarts_after_a_cycle_without_attitude_hold() {
+  // Still outside the envelope on that cycle, but the cut-off was not evaluated.
+  for (int kind = 0; kind < 3; ++kind) {
     Rig rig;
     rig.readyToControl();
-    rig.estimator.output.bodyRate = Vec3{0.0f, sign * (FlightConfig::kMaxPitchYawRate + 0.1f), 0.0f};
-    rig.stepHold(StateId::Control);
-    TEST_ASSERT_TRUE(rig.status().cutoffLatched);
-    EXPECT_GATED(rig, CanardGate::kCutoff, 0);
+    HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+    if (kind == 0) rig.step(StateId::Control);         // no request
+    if (kind == 1) rig.stepNeutral(StateId::Control);  // neutral
+    if (kind == 2) {                                   // a conflict
+      rig.stepWith(StateId::Control, [](Canards& c) {
+        c.requestAttitudeHold(reference());
+        c.requestNeutral();
+      });
+    }
+    TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+    HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 1);
+    EXPECT_LATCHES_NEXT(rig, tilted());
   }
 }
 
-static void test_cutoff_latches_on_yaw_rate_either_sign() {
-  const float signs[] = {1.0f, -1.0f};
-  for (float sign : signs) {
-    Rig rig;
-    rig.readyToControl();
-    rig.estimator.output.bodyRate = Vec3{0.0f, 0.0f, sign * (FlightConfig::kMaxPitchYawRate + 0.1f)};
-    rig.stepHold(StateId::Control);
-    TEST_ASSERT_TRUE(rig.status().cutoffLatched);
-    EXPECT_GATED(rig, CanardGate::kCutoff, 0);
-  }
+static void test_cutoff_run_continues_through_a_hold_closed_by_another_gate() {
+  // A hold refused by the safety gate is still an evaluated attitude hold.
+  Rig rig;
+  rig.readyToControl();
+  HOLD_OUTSIDE(rig, tilted(), kCutoffSamples - 2);
+  rig.safetyActive = true;
+  rig.stepHold(StateId::Control);
+  TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+  EXPECT_GATED(rig, CanardGate::kSafetyFault, kCutoffSamples - 2);
+  rig.safetyActive = false;
+  EXPECT_LATCHES_NEXT(rig, tilted());
 }
 
 static void test_cutoff_rates_exactly_at_the_limit_do_not_trip() {
@@ -766,9 +992,9 @@ static void test_roll_rate_does_not_trip_the_cutoff() {
 static void test_cutoff_stays_latched_after_the_condition_clears() {
   Rig rig;
   rig.readyToControl();
-  rig.estimator.output.bodyRate = Vec3{0.0f, FlightConfig::kMaxPitchYawRate + 1.0f, 0.0f};
-  rig.stepHold(StateId::Control);
-  TEST_ASSERT_TRUE(rig.status().cutoffLatched);
+  const Outside pitch{noseUpTilted(0.1f), Vec3{0.0f, FlightConfig::kMaxPitchYawRate + 1.0f, 0.0f}, "pitch"};
+  HOLD_OUTSIDE(rig, pitch, kCutoffSamples - 1);
+  EXPECT_LATCHES_NEXT(rig, pitch);
 
   scriptGoodFlight(rig.estimator);
   for (int i = 0; i < 20; ++i) {
@@ -888,14 +1114,55 @@ static void test_preflight_then_init_then_launch_locks_out() {
 static void test_canards_are_disabled_at_boot() {
   Rig rig;
   TEST_ASSERT_FALSE(rig.status().enabled);
-  TEST_ASSERT_FALSE(rig.status().powered);
-  TEST_ASSERT_EQUAL_UINT8(u8(CanardMode::Off), u8(rig.status().mode));
 
+  // Disabled, but a ground test still moves them.
   rig.stepTest(StateId::Init);
   TEST_ASSERT_FALSE(rig.status().enabled);
-  EXPECT_OFF(rig, "boot");
-  // An allowed request, merely unpowered: not a denial.
+  TEST_ASSERT_TRUE(rig.status().powered);
+  EXPECT_MODE(CanardMode::Testing, rig, "boot");
+  EXPECT_COMMAND(rig, kTestAngles, "boot");
   TEST_ASSERT_EQUAL_UINT32(0, rig.status().deniedCount);
+  TEST_ASSERT_EQUAL_UINT32(0, rig.status().rejectedCommandCount);
+}
+
+static void test_servos_are_powered_at_boot_holding_zero() {
+  {  // No request at all.
+    Rig rig;
+    rig.step(StateId::Init);
+    EXPECT_POWERED_NEUTRAL(rig, "boot");
+    TEST_ASSERT_FALSE(rig.status().enabled);
+    TEST_ASSERT_EQUAL_UINT8(u8(CanardRequest::None), u8(rig.status().request));
+    TEST_ASSERT_EQUAL_UINT32(0, rig.status().deniedCount);
+  }
+  {  // Init asking for neutral, for a while.
+    Rig rig;
+    for (int i = 0; i < 20; ++i) {
+      rig.stepNeutral(StateId::Init);
+      EXPECT_POWERED_NEUTRAL(rig, "init");
+      TEST_ASSERT_FALSE(rig.status().enabled);
+    }
+  }
+}
+
+static void test_power_follows_the_state_whether_enabled_or_not() {
+  for (StateId s : kAllStates) {
+    for (int enabled = 0; enabled < 2; ++enabled) {
+      Rig rig;
+      if (enabled) rig.enable(StateId::Init);
+      rig.step(StateId::Init);
+      if (s != StateId::Init) rig.step(StateId::PreFlight);
+      if (isFlightState(s)) rig.step(StateId::Boost);
+      rig.stepNeutral(s);
+      rig.stepNeutral(s);
+      const char* what = stateName(s);
+      TEST_ASSERT_EQUAL_MESSAGE(enabled != 0, rig.status().enabled, what);
+      if (s == StateId::Chute || s == StateId::Land) {
+        EXPECT_OFF(rig, what);
+      } else {
+        EXPECT_POWERED_NEUTRAL(rig, what);
+      }
+    }
+  }
 }
 
 static void test_enable_is_accepted_on_the_ground() {
@@ -919,7 +1186,16 @@ static void test_enable_is_rejected_and_counted_in_every_flight_state() {
     rig.step(s);
     TEST_ASSERT_FALSE_MESSAGE(rig.status().enabled, stateName(s));
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, rig.status().rejectedCommandCount, stateName(s));
-    EXPECT_OFF(rig, stateName(s));
+    if (s == StateId::Chute || s == StateId::Land) {
+      EXPECT_OFF(rig, stateName(s));
+    } else {
+      EXPECT_POWERED_NEUTRAL(rig, stateName(s));
+    }
+    if (s == StateId::Control) {  // and attitude hold stays refused
+      rig.stepHold(s);
+      TEST_ASSERT_TRUE_MESSAGE((rig.status().gates & CanardGate::kNotEnabled) != 0, stateName(s));
+      EXPECT_POWERED_NEUTRAL(rig, stateName(s));
+    }
     rig.enable(s);
     rig.step(s);
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(2, rig.status().rejectedCommandCount, stateName(s));
@@ -936,24 +1212,33 @@ static void test_disable_is_accepted_in_every_state() {
     rig.disable(s);
     rig.step(s);
     TEST_ASSERT_FALSE_MESSAGE(rig.status().enabled, stateName(s));
-    EXPECT_OFF(rig, stateName(s));
+    // Disabling does not switch power: only the state does.
+    if (s == StateId::Chute || s == StateId::Land) {
+      EXPECT_OFF(rig, stateName(s));
+    } else {
+      EXPECT_POWERED_NEUTRAL(rig, stateName(s));
+    }
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, rig.status().rejectedCommandCount, stateName(s));
   }
 }
 
-static void test_disable_in_flight_drops_power_for_good() {
+static void test_disable_in_flight_holds_zero_powered_for_good() {
   Rig rig;
   rig.readyToControl();
   TEST_ASSERT_TRUE(rig.out.servoPower);
   rig.disable(StateId::Boost);
   rig.step(StateId::Boost);
-  EXPECT_OFF(rig, "disabled in boost");
-  // And it cannot be turned back on in flight.
+  TEST_ASSERT_FALSE(rig.status().enabled);
+  EXPECT_POWERED_NEUTRAL(rig, "disabled in boost");
+  // And it cannot be enabled again in flight: attitude hold stays refused.
   rig.enable(StateId::Control);
-  rig.stepHold(StateId::Control);
-  EXPECT_OFF(rig, "re-enable refused");
+  for (int i = 0; i < 10; ++i) {
+    rig.stepHold(StateId::Control);
+    EXPECT_GATED(rig, CanardGate::kNotEnabled, 0);
+    EXPECT_POWERED_NEUTRAL(rig, "re-enable refused");
+    TEST_ASSERT_FALSE(rig.status().enabled);
+  }
   TEST_ASSERT_EQUAL_UINT32(1, rig.status().rejectedCommandCount);
-  TEST_ASSERT_EQUAL_UINT32(0, rig.controller.callCount());
 }
 
 static void test_no_servo_power_in_chute_and_land_even_when_enabled() {
@@ -991,19 +1276,30 @@ static void test_other_commands_are_ignored() {
 }
 
 static void test_a_forbidden_hold_reports_no_gate_powered_or_not() {
-  // Disabled: refused by the table, not by the gates.
+  // Disabled: refused by the table, not by the gates (no kNotEnabled).
   Rig rig;
   rig.stepHold(StateId::Init);
   TEST_ASSERT_EQUAL_UINT32(1, rig.status().deniedCount);
   EXPECT_LAST_DENIED(CanardRequest::AttitudeHold, rig, "disabled");
   TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates);
-  EXPECT_OFF(rig, "disabled");
+  EXPECT_POWERED_NEUTRAL(rig, "disabled");
 
   rig.enable(StateId::Init);
   rig.stepHold(StateId::Init);
   TEST_ASSERT_EQUAL_UINT32(2, rig.status().deniedCount);
   TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates);
   EXPECT_POWERED_NEUTRAL(rig, "enabled");
+
+  // Unpowered, in Chute, after a normal flight.
+  rig.step(StateId::PreFlight);
+  rig.step(StateId::Boost);
+  rig.step(StateId::Control);
+  rig.step(StateId::Coast);
+  rig.step(StateId::Chute);
+  rig.stepHold(StateId::Chute);
+  TEST_ASSERT_EQUAL_UINT32(3, rig.status().deniedCount);
+  TEST_ASSERT_EQUAL_HEX16(0, rig.status().gates);
+  EXPECT_OFF(rig, "unpowered");
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,18 +1313,39 @@ static bool allZero(const CanardAngles& a) {
   return true;
 }
 
-static void test_servo_model_is_reset_on_power_down() {
-  Rig rig;
-  rig.enterEnabled(StateId::Init);
-  for (int i = 0; i < 20; ++i) rig.stepTest(StateId::Init);
-  TEST_ASSERT_FALSE(rig.status().angles.measured);  // no encoders: the model
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, kTestAngles[3], rig.status().angles.rad[3]);
+// Control (or Coast after it) -> Chute is where power goes off in a flight.
+static void test_servo_model_is_reset_on_the_power_down_into_chute() {
+  const StateId lastPowered[] = {StateId::Control, StateId::Coast};
+  for (StateId before : lastPowered) {
+    Rig rig;
+    rig.readyToControl();
+    for (int i = 0; i < 20; ++i) rig.stepHold(StateId::Control);
+    EXPECT_MODE(CanardMode::Controlling, rig, "controlling");
+    TEST_ASSERT_FALSE(rig.status().angles.measured);  // no encoders: the model
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, kControllerCommand[3], rig.status().angles.rad[3]);
+    if (before == StateId::Coast) rig.step(StateId::Coast);  // one lag step towards zero, no more
+    TEST_ASSERT_FALSE_MESSAGE(allZero(rig.status().angles), stateName(before));
 
+    rig.step(StateId::Chute);
+    EXPECT_OFF(rig, stateName(before));
+    // Unpowered, the model is not advanced, so only a reset brings it to zero.
+    rig.step(StateId::Chute);
+    TEST_ASSERT_TRUE_MESSAGE(allZero(rig.status().angles), stateName(before));
+  }
+}
+
+static void test_disable_does_not_reset_the_servo_model() {
+  // Disabling keeps power on, so the model keeps following the servo.
+  Rig rig;
+  for (int i = 0; i < 20; ++i) rig.stepTest(StateId::Init);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, kTestAngles[3], rig.status().angles.rad[3]);
+  rig.enable(StateId::Init);
   rig.disable(StateId::Init);
   rig.step(StateId::Init);
-  // Unpowered, the model is not advanced, so only a reset brings it to zero.
   rig.step(StateId::Init);
-  TEST_ASSERT_TRUE(allZero(rig.status().angles));
+  EXPECT_POWERED_NEUTRAL(rig, "disabled");
+  TEST_ASSERT_FALSE(allZero(rig.status().angles));  // decaying, not reset
+  TEST_ASSERT_TRUE(std::fabs(rig.status().angles.rad[3]) < std::fabs(kTestAngles[3]));
 }
 
 static void test_servo_model_is_reset_on_entering_chute() {
@@ -1051,8 +1368,7 @@ static void test_servo_model_is_reset_on_power_up() {
   rig.servo.measure(rig.feedback, before);
   TEST_ASSERT_FALSE(allZero(before));
 
-  rig.enable(StateId::Init);
-  rig.step(StateId::Init);  // power-up, neutral
+  rig.step(StateId::Init);  // the first cycle after boot: power-up, neutral (no enable needed)
   TEST_ASSERT_TRUE(rig.status().powered);
   // Without a reset the neutral command would only have moved the model one
   // lag step towards zero.
@@ -1071,12 +1387,14 @@ int main(int, char**) {
   RUN_TEST(test_neutral_twice_is_not_a_conflict);
   RUN_TEST(test_denials_accumulate_and_last_denied_follows_the_latest);
   RUN_TEST(test_a_request_lasts_one_cycle);
-  RUN_TEST(test_test_angles_on_the_launch_cycle_are_refused);
+  RUN_TEST(test_test_angles_on_the_launch_cycle_end_at_neutral_uncounted);
+  RUN_TEST(test_transition_cycle_exempts_only_the_old_states_allowed_request);
   RUN_TEST(test_attitude_hold_acts_with_every_gate_open);
   RUN_TEST(test_controller_receives_error_rate_angles_and_speed);
   RUN_TEST(test_gate_not_enabled);
   RUN_TEST(test_gate_not_enabled_after_disable_in_flight);
   RUN_TEST(test_gate_locked_out);
+  RUN_TEST(test_a_locked_out_rocket_is_powered_at_zero_in_control);
   RUN_TEST(test_gate_safety_fault);
   RUN_TEST(test_gate_attitude_invalid);
   RUN_TEST(test_gate_speed_invalid);
@@ -1088,11 +1406,17 @@ int main(int, char**) {
   RUN_TEST(test_gate_non_finite_or_non_unit_reference);
   RUN_TEST(test_output_is_clamped_to_the_canard_limit);
   RUN_TEST(test_test_angles_are_clamped_to_the_ground_test_limit);
+  RUN_TEST(test_test_angles_act_without_enable);
   RUN_TEST(test_a_non_finite_test_angle_makes_the_request_neutral);
   RUN_TEST(test_a_safety_fault_forces_test_angles_to_neutral);
-  RUN_TEST(test_cutoff_latches_on_tilt);
-  RUN_TEST(test_cutoff_latches_on_pitch_rate_either_sign);
-  RUN_TEST(test_cutoff_latches_on_yaw_rate_either_sign);
+  RUN_TEST(test_cutoff_latches_on_tilt_after_its_hold);
+  RUN_TEST(test_cutoff_latches_on_pitch_rate_either_sign_after_its_hold);
+  RUN_TEST(test_cutoff_latches_on_yaw_rate_either_sign_after_its_hold);
+  RUN_TEST(test_cutoff_run_switching_between_limits_is_one_run);
+  RUN_TEST(test_cutoff_run_restarts_after_a_cycle_inside_the_envelope);
+  RUN_TEST(test_cutoff_run_restarts_after_a_hold_without_a_valid_attitude);
+  RUN_TEST(test_cutoff_run_restarts_after_a_cycle_without_attitude_hold);
+  RUN_TEST(test_cutoff_run_continues_through_a_hold_closed_by_another_gate);
   RUN_TEST(test_cutoff_rates_exactly_at_the_limit_do_not_trip);
   RUN_TEST(test_roll_rate_does_not_trip_the_cutoff);
   RUN_TEST(test_cutoff_stays_latched_after_the_condition_clears);
@@ -1102,14 +1426,17 @@ int main(int, char**) {
   RUN_TEST(test_launch_from_preflight_controls);
   RUN_TEST(test_preflight_then_init_then_launch_locks_out);
   RUN_TEST(test_canards_are_disabled_at_boot);
+  RUN_TEST(test_servos_are_powered_at_boot_holding_zero);
+  RUN_TEST(test_power_follows_the_state_whether_enabled_or_not);
   RUN_TEST(test_enable_is_accepted_on_the_ground);
   RUN_TEST(test_enable_is_rejected_and_counted_in_every_flight_state);
   RUN_TEST(test_disable_is_accepted_in_every_state);
-  RUN_TEST(test_disable_in_flight_drops_power_for_good);
+  RUN_TEST(test_disable_in_flight_holds_zero_powered_for_good);
   RUN_TEST(test_no_servo_power_in_chute_and_land_even_when_enabled);
   RUN_TEST(test_other_commands_are_ignored);
   RUN_TEST(test_a_forbidden_hold_reports_no_gate_powered_or_not);
-  RUN_TEST(test_servo_model_is_reset_on_power_down);
+  RUN_TEST(test_servo_model_is_reset_on_the_power_down_into_chute);
+  RUN_TEST(test_disable_does_not_reset_the_servo_model);
   RUN_TEST(test_servo_model_is_reset_on_entering_chute);
   RUN_TEST(test_servo_model_is_reset_on_power_up);
   return UNITY_END();

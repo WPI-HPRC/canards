@@ -624,7 +624,11 @@ void test_control_speed_exit_ignores_an_invalid_speed() {
   }
 }
 
-void test_control_leaves_on_the_cutoff_latch_from_tilt() {
+// The cut-off latches in periodic() after kCutoffHoldUs of consecutive
+// outside-the-envelope attitude-hold cycles; Control then leaves on the next
+// cycle, with no hold of its own, even with the condition gone.
+void expectControlLeavesOnTheCutoffLatch(void (*setOutside)(Rig&, bool)) {
+  const uint64_t n = samplesToHold(fc::kCutoffHoldUs);
   Rig rig;
   rig.enableFromPreFlight();
   rig.speed = 2.0f * fc::kControlEndSpeed;
@@ -633,26 +637,43 @@ void test_control_leaves_on_the_cutoff_latch_from_tilt() {
   TEST_ASSERT_FALSE(rig.status().cutoffLatched);
   TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Controlling);
 
+  setOutside(rig, true);
+  const uint64_t firstOutsideUs = rig.timeUs + kStepUs;
+  for (uint64_t i = 0; i + 1 < n; ++i) {  // one sample short: not latched
+    EXPECT_STATE(StateId::Control, rig.step());
+    TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+  }
   // The latch trips in this cycle's periodic(), after next() has run.
-  rig.attitude = noseUpTilted(1.5f * fc::kMaxTiltRad);
   EXPECT_STATE(StateId::Control, rig.step());
   TEST_ASSERT_TRUE(rig.status().cutoffLatched);
-  // So Control leaves on the next cycle, with no hold, even with the tilt gone.
-  rig.attitude = noseUpTilted(0.0f);
+  TEST_ASSERT_EQUAL_UINT64(firstOutsideUs + ceilToStep(fc::kCutoffHoldUs), rig.timeUs);
+  setOutside(rig, false);
   EXPECT_STATE(StateId::Coast, rig.step());
 }
 
-void test_control_leaves_on_the_cutoff_latch_from_rate() {
+void setTilted(Rig& rig, bool on) { rig.attitude = noseUpTilted(on ? 1.5f * fc::kMaxTiltRad : 0.0f); }
+void setYawing(Rig& rig, bool on) { rig.bodyRate = Vec3{0.0f, 0.0f, on ? 1.5f * fc::kMaxPitchYawRate : 0.0f}; }
+
+void test_control_leaves_on_the_cutoff_latch_from_tilt() { expectControlLeavesOnTheCutoffLatch(setTilted); }
+
+void test_control_leaves_on_the_cutoff_latch_from_rate() { expectControlLeavesOnTheCutoffLatch(setYawing); }
+
+void test_control_stays_when_the_cutoff_run_is_interrupted() {
+  const uint64_t n = samplesToHold(fc::kCutoffHoldUs);
   Rig rig;
   rig.enableFromPreFlight();
   rig.speed = 2.0f * fc::kControlEndSpeed;
   rig.enter(StateId::Control);
   EXPECT_STATE(StateId::Control, rig.step());
-  rig.bodyRate = Vec3{0.0f, 0.0f, 1.5f * fc::kMaxPitchYawRate};
+  for (int run = 0; run < 5; ++run) {
+    setTilted(rig, true);
+    for (uint64_t i = 0; i + 1 < n; ++i) EXPECT_STATE(StateId::Control, rig.step());
+    setTilted(rig, false);
+    EXPECT_STATE(StateId::Control, rig.step());
+    TEST_ASSERT_FALSE(rig.status().cutoffLatched);
+  }
   EXPECT_STATE(StateId::Control, rig.step());
-  TEST_ASSERT_TRUE(rig.status().cutoffLatched);
-  rig.bodyRate = Vec3{};
-  EXPECT_STATE(StateId::Coast, rig.step());
+  TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Controlling);
 }
 
 void test_control_timeout_at_exactly_its_limit() {
@@ -763,16 +784,14 @@ void test_flight_states_request_neutral_and_ignore_ground_commands() {
 // GroundTest
 // ===========================================================================
 
-// A rig in Init with the canards enabled, driving one GroundTest directly.
+// A rig in Init, driving one GroundTest directly. The canards are NOT
+// enabled: ground tests do not need it.
 struct GroundRig {
   Rig rig;
-  GroundTest test{rig.canards};
+  GroundTest test;
   bool lastActive = false;
 
-  GroundRig() {
-    rig.canards.handleCommand(makeCommand(CommandType::CanardsEnable), StateId::Init);
-    rig.enter(StateId::Init);
-  }
+  explicit GroundRig(bool allowSweep = true) : test(rig.canards, allowSweep) { rig.enter(StateId::Init); }
 
   // One cycle at `t` in which only the ground test runs. Returns update().
   bool stepAt(uint64_t t) {
@@ -927,14 +946,14 @@ void test_ground_test_requests_its_angles_every_cycle_while_active() {
 void test_init_and_preflight_run_the_ground_test_without_a_conflict() {
   const StateId ground[] = {StateId::Init, StateId::PreFlight};
   for (StateId id : ground) {
-    Rig rig;
-    rig.canards.handleCommand(makeCommand(CommandType::CanardsEnable), id);
+    Rig rig;  // never enabled
     rig.enter(id);
     rig.push(makeTestCommand(-1, kAngle));
     EXPECT_STATE(id, rig.step());
     for (int i = 0; i < 5; ++i) {
       EXPECT_REQUEST(CanardRequest::TestAngles, rig.status().request);
       TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Testing);
+      TEST_ASSERT_FALSE(rig.status().enabled);
       TEST_ASSERT_EQUAL_UINT32(0, rig.status().deniedCount);
       EXPECT_STATE(id, rig.step());
     }
@@ -986,6 +1005,249 @@ void test_ground_test_is_cleared_when_init_or_preflight_is_left() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The actuator sweep (CanardSweep)
+// ---------------------------------------------------------------------------
+
+static_assert(GroundTest::kSweepSteps == 2 * kNumCanards + 2, "each canard + then -, then all + then all -");
+
+// The angles of sweep step `step`, written out independently of GroundTest.
+void expectedSweep(int step, float out[kNumCanards]) {
+  const float a = fc::kSweepAmplitudeRad;
+  for (int i = 0; i < kNumCanards; ++i) out[i] = 0.0f;
+  if (step < 2 * kNumCanards) {
+    out[step / 2] = step % 2 == 0 ? a : -a;
+  } else {
+    for (int i = 0; i < kNumCanards; ++i) out[i] = step == 2 * kNumCanards ? a : -a;
+  }
+}
+
+// GroundTest is asking for, and the canards are at, sweep step `step`.
+void expectSweepStepAt(int line, const GroundRig& g, int step) {
+  float expected[kNumCanards];
+  expectedSweep(step, expected);
+  UNITY_TEST_ASSERT(g.lastActive, line, "active");
+  UNITY_TEST_ASSERT(g.test.sweeping(), line, "sweeping");
+  UNITY_TEST_ASSERT(g.rig.status().mode == CanardMode::Testing, line, "testing");
+  UNITY_TEST_ASSERT_EQUAL_UINT32(0, g.rig.status().deniedCount, line, "denied");
+  for (int i = 0; i < kNumCanards; ++i) {
+    UNITY_TEST_ASSERT_EQUAL_FLOAT(expected[i], g.test.angles()[i], line, "requested");
+    UNITY_TEST_ASSERT_EQUAL_FLOAT(expected[i], g.rig.status().commandRad[i], line, "commanded");
+  }
+}
+#define EXPECT_SWEEP_STEP(g, step) expectSweepStepAt(__LINE__, (g), (step))
+
+void expectIdleAt(int line, const GroundRig& g) {
+  UNITY_TEST_ASSERT(!g.lastActive, line, "not active");
+  UNITY_TEST_ASSERT(!g.test.sweeping(), line, "not sweeping");
+  UNITY_TEST_ASSERT(g.rig.status().mode == CanardMode::Neutral, line, "neutral");
+  UNITY_TEST_ASSERT_EQUAL_INT(static_cast<int>(CanardRequest::None), static_cast<int>(g.rig.status().request), line,
+                              "no request");
+  for (int i = 0; i < kNumCanards; ++i) UNITY_TEST_ASSERT_EQUAL_FLOAT(0.0f, g.test.angles()[i], line, "zero");
+}
+#define EXPECT_IDLE(g) expectIdleAt(__LINE__, (g))
+
+// Starts a sweep on the next cycle; returns that cycle's sample time.
+uint64_t startSweep(GroundRig& g) {
+  g.rig.push(makeCommand(CommandType::CanardSweep));
+  TEST_ASSERT_TRUE(g.step());
+  return g.rig.timeUs;
+}
+
+void test_sweep_angles_each_canard_then_all() {
+  const float a = fc::kSweepAmplitudeRad;
+  TEST_ASSERT_TRUE(a > 0.0f);
+  for (int step = 0; step < GroundTest::kSweepSteps; ++step) {
+    float expected[kNumCanards];
+    expectedSweep(step, expected);
+    float out[kNumCanards] = {9.0f, 9.0f, 9.0f, 9.0f};
+    GroundTest::sweepAngles(step, out);
+    for (int i = 0; i < kNumCanards; ++i) TEST_ASSERT_EQUAL_FLOAT(expected[i], out[i]);
+  }
+  // Spelled out for the first and the last two steps.
+  float out[kNumCanards];
+  GroundTest::sweepAngles(0, out);
+  TEST_ASSERT_EQUAL_FLOAT(a, out[0]);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, out[1]);
+  GroundTest::sweepAngles(1, out);
+  TEST_ASSERT_EQUAL_FLOAT(-a, out[0]);
+  GroundTest::sweepAngles(2 * kNumCanards - 1, out);
+  TEST_ASSERT_EQUAL_FLOAT(-a, out[kNumCanards - 1]);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, out[0]);
+  GroundTest::sweepAngles(2 * kNumCanards, out);
+  for (int i = 0; i < kNumCanards; ++i) TEST_ASSERT_EQUAL_FLOAT(a, out[i]);
+  GroundTest::sweepAngles(2 * kNumCanards + 1, out);
+  for (int i = 0; i < kNumCanards; ++i) TEST_ASSERT_EQUAL_FLOAT(-a, out[i]);
+}
+
+void test_sweep_angles_out_of_range_are_zero() {
+  const int bad[] = {-1, GroundTest::kSweepSteps, GroundTest::kSweepSteps + 1, 1000,
+                     std::numeric_limits<int>::min(), std::numeric_limits<int>::max()};
+  for (int step : bad) {
+    float out[kNumCanards] = {9.0f, -9.0f, 9.0f, -9.0f};
+    GroundTest::sweepAngles(step, out);
+    for (int i = 0; i < kNumCanards; ++i) TEST_ASSERT_EQUAL_FLOAT(0.0f, out[i]);
+  }
+}
+
+void test_sweep_runs_its_steps_on_time_then_returns_to_neutral() {
+  GroundRig g;
+  TEST_ASSERT_FALSE(g.step());
+  TEST_ASSERT_FALSE(g.test.sweeping());
+  const uint64_t startUs = startSweep(g);
+  EXPECT_SWEEP_STEP(g, 0);
+  TEST_ASSERT_FALSE(g.rig.status().enabled);  // not needed
+  for (int step = 0; step < GroundTest::kSweepSteps; ++step) {
+    const uint64_t stepUs = startUs + static_cast<uint64_t>(step) * fc::kSweepStepUs;
+    g.stepAt(stepUs + (step == 0 ? kStepUs : 0));  // the boundary itself (step 0's was the start)
+    EXPECT_SWEEP_STEP(g, step);
+    g.stepAt(stepUs + fc::kSweepStepUs - 1);  // the last microsecond of the step
+    EXPECT_SWEEP_STEP(g, step);
+  }
+  // Exactly kSweepSteps steps after the start: finished, back to neutral.
+  TEST_ASSERT_FALSE(g.stepAt(startUs + GroundTest::kSweepSteps * fc::kSweepStepUs));
+  EXPECT_IDLE(g);
+  TEST_ASSERT_FALSE(g.step());
+  EXPECT_IDLE(g);
+}
+
+void test_sweep_requests_its_angles_every_cycle() {
+  GroundRig g;
+  const uint64_t startUs = startSweep(g);
+  while (g.rig.timeUs + kStepUs < startUs + GroundTest::kSweepSteps * fc::kSweepStepUs) {
+    TEST_ASSERT_TRUE(g.step());
+    EXPECT_SWEEP_STEP(g, static_cast<int>((g.rig.timeUs - startUs) / fc::kSweepStepUs));
+  }
+  TEST_ASSERT_FALSE(g.step());
+  EXPECT_IDLE(g);
+}
+
+void test_sweep_is_ignored_where_not_allowed() {
+  {
+    GroundRig g(/*allowSweep=*/false);
+    g.rig.push(makeCommand(CommandType::CanardSweep));
+    TEST_ASSERT_FALSE(g.step());
+    EXPECT_IDLE(g);
+    TEST_ASSERT_FALSE(g.step());
+    EXPECT_IDLE(g);
+  }
+  {  // And it does not cancel a running hold there.
+    GroundRig g(/*allowSweep=*/false);
+    g.rig.push(makeTestCommand(-1, kAngle));
+    TEST_ASSERT_TRUE(g.step());
+    const uint64_t startedUs = g.rig.timeUs;
+    g.rig.push(makeCommand(CommandType::CanardSweep));
+    TEST_ASSERT_TRUE(g.step());
+    TEST_ASSERT_FALSE(g.test.sweeping());
+    expectAngles(g, kAngle, kAngle, kAngle, kAngle);
+    TEST_ASSERT_TRUE(g.stepAt(startedUs + fc::kGroundTestHoldUs - 1));
+    TEST_ASSERT_FALSE(g.stepAt(startedUs + fc::kGroundTestHoldUs));
+  }
+  {  // PreFlight's GroundTest is one of those.
+    Rig rig;
+    rig.enter(StateId::PreFlight);
+    rig.push(makeCommand(CommandType::CanardSweep));
+    EXPECT_STATE(StateId::PreFlight, rig.step());
+    EXPECT_REQUEST(CanardRequest::Neutral, rig.status().request);
+    EXPECT_STATE(StateId::PreFlight, rig.step());
+    EXPECT_REQUEST(CanardRequest::Neutral, rig.status().request);
+  }
+}
+
+void test_sweep_is_cancelled_by_canard_test_stop() {
+  GroundRig g;
+  const uint64_t startUs = startSweep(g);
+  g.stepAt(startUs + 3 * fc::kSweepStepUs);
+  EXPECT_SWEEP_STEP(g, 3);
+  g.rig.push(makeCommand(CommandType::CanardTestStop));
+  TEST_ASSERT_FALSE(g.step());
+  EXPECT_IDLE(g);
+  // It does not come back where it would have been.
+  TEST_ASSERT_FALSE(g.stepAt(startUs + 5 * fc::kSweepStepUs));
+  EXPECT_IDLE(g);
+}
+
+void test_sweep_is_cancelled_by_canard_test() {
+  GroundRig g;
+  const uint64_t startUs = startSweep(g);
+  g.stepAt(startUs + 2 * fc::kSweepStepUs);
+  EXPECT_SWEEP_STEP(g, 2);
+  g.rig.push(makeTestCommand(-1, kAngle));
+  TEST_ASSERT_TRUE(g.step());
+  const uint64_t heldUs = g.rig.timeUs;
+  TEST_ASSERT_FALSE(g.test.sweeping());
+  expectAngles(g, kAngle, kAngle, kAngle, kAngle);
+  // An ordinary hold from here: it runs out after kGroundTestHoldUs, not at
+  // the end of the sweep.
+  TEST_ASSERT_TRUE(g.stepAt(startUs + GroundTest::kSweepSteps * fc::kSweepStepUs));
+  expectAngles(g, kAngle, kAngle, kAngle, kAngle);
+  TEST_ASSERT_TRUE(g.stepAt(heldUs + fc::kGroundTestHoldUs - 1));
+  TEST_ASSERT_FALSE(g.stepAt(heldUs + fc::kGroundTestHoldUs));
+  EXPECT_IDLE(g);
+}
+
+// A sweep forgets the hold it replaced: a single-canard test afterwards moves
+// only that canard, not the cancelled hold's canard as well.
+void test_a_single_canard_test_after_a_sweep_starts_from_neutral() {
+  GroundRig g;
+  g.rig.push(makeTestCommand(0, kAngle));
+  TEST_ASSERT_TRUE(g.step());
+  expectAngles(g, kAngle, 0.0f, 0.0f, 0.0f);
+  startSweep(g);
+  TEST_ASSERT_TRUE(g.test.sweeping());
+  g.rig.push(makeTestCommand(1, -kAngle));
+  TEST_ASSERT_TRUE(g.step());
+  TEST_ASSERT_FALSE(g.test.sweeping());
+  expectAngles(g, 0.0f, -kAngle, 0.0f, 0.0f);
+}
+
+void test_sweep_replaces_a_running_hold_and_a_repeat_restarts_it() {
+  GroundRig g;
+  g.rig.push(makeTestCommand(-1, kAngle));
+  TEST_ASSERT_TRUE(g.step());
+  const uint64_t startUs = startSweep(g);
+  EXPECT_SWEEP_STEP(g, 0);
+  g.stepAt(startUs + 4 * fc::kSweepStepUs);
+  EXPECT_SWEEP_STEP(g, 4);
+  // A second CanardSweep starts again from step 0, timed from its own cycle.
+  const uint64_t againUs = startSweep(g);
+  EXPECT_SWEEP_STEP(g, 0);
+  g.stepAt(againUs + fc::kSweepStepUs - 1);
+  EXPECT_SWEEP_STEP(g, 0);
+  g.stepAt(againUs + fc::kSweepStepUs);
+  EXPECT_SWEEP_STEP(g, 1);
+  // At the end the old hold does not come back.
+  TEST_ASSERT_FALSE(g.stepAt(againUs + GroundTest::kSweepSteps * fc::kSweepStepUs));
+  EXPECT_IDLE(g);
+}
+
+void test_sweep_is_cleared_when_init_is_left() {
+  Rig rig;
+  rig.enter(StateId::Init);
+  rig.push(makeCommand(CommandType::CanardSweep));
+  EXPECT_STATE(StateId::Init, rig.step());
+  TEST_ASSERT_TRUE(rig.init.sweeping());
+  TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Testing);
+  // Armed: the command cycle is still Init's last execute(), sweeping.
+  rig.push(makeCommand(CommandType::EnterPreFlight));
+  EXPECT_STATE(StateId::PreFlight, rig.step());
+  TEST_ASSERT_TRUE(rig.init.sweeping());
+  Cycle cycle{rig.timeUs, 0.0f, 0, rig.nav, rig.commands};
+  rig.init.end(cycle);
+  TEST_ASSERT_FALSE(rig.init.sweeping());
+  rig.enter(StateId::PreFlight);
+  rig.step();
+  EXPECT_REQUEST(CanardRequest::Neutral, rig.status().request);
+  // Back to Init well inside the old sweep: it does not resume.
+  rig.push(makeCommand(CommandType::StandDown));
+  EXPECT_STATE(StateId::Init, rig.step());
+  rig.preFlight.end(cycle);
+  rig.enter(StateId::Init);
+  rig.step();
+  TEST_ASSERT_FALSE(rig.init.sweeping());
+  EXPECT_REQUEST(CanardRequest::Neutral, rig.status().request);
+}
+
 }  // namespace
 
 int main() {
@@ -1017,6 +1279,7 @@ int main() {
   RUN_TEST(test_control_speed_exit_ignores_an_invalid_speed);
   RUN_TEST(test_control_leaves_on_the_cutoff_latch_from_tilt);
   RUN_TEST(test_control_leaves_on_the_cutoff_latch_from_rate);
+  RUN_TEST(test_control_stays_when_the_cutoff_run_is_interrupted);
   RUN_TEST(test_control_timeout_at_exactly_its_limit);
   RUN_TEST(test_coast_speed_exit_is_debounced);
   RUN_TEST(test_coast_timeout_at_exactly_its_limit);
@@ -1035,5 +1298,15 @@ int main() {
   RUN_TEST(test_ground_test_requests_its_angles_every_cycle_while_active);
   RUN_TEST(test_init_and_preflight_run_the_ground_test_without_a_conflict);
   RUN_TEST(test_ground_test_is_cleared_when_init_or_preflight_is_left);
+  RUN_TEST(test_sweep_angles_each_canard_then_all);
+  RUN_TEST(test_sweep_angles_out_of_range_are_zero);
+  RUN_TEST(test_sweep_runs_its_steps_on_time_then_returns_to_neutral);
+  RUN_TEST(test_sweep_requests_its_angles_every_cycle);
+  RUN_TEST(test_sweep_is_ignored_where_not_allowed);
+  RUN_TEST(test_sweep_is_cancelled_by_canard_test_stop);
+  RUN_TEST(test_sweep_is_cancelled_by_canard_test);
+  RUN_TEST(test_a_single_canard_test_after_a_sweep_starts_from_neutral);
+  RUN_TEST(test_sweep_replaces_a_running_hold_and_a_repeat_restarts_it);
+  RUN_TEST(test_sweep_is_cleared_when_init_is_left);
   return UNITY_END();
 }

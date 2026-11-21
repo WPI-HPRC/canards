@@ -3,11 +3,18 @@
 // Ground tests of the canards, shared by Init and PreFlight
 // (docs/HANDOFF-flight-skeleton-2026-11-20.md, section 6.2).
 //
-// Turns CanardTest / CanardTestStop commands into a held set of test angles.
-// Each accepted CanardTest (re)starts a hold of FlightConfig::kGroundTestHoldUs
-// of sample time; while the hold lasts the angles are requested every cycle.
-// When it runs out the canards go back to neutral unless the command is
-// repeated, so a lost "stop" packet cannot leave a canard deflected.
+// Two kinds of test:
+//   - CanardTest / CanardTestStop: a held set of test angles. Each accepted
+//     CanardTest (re)starts a hold of FlightConfig::kGroundTestHoldUs of
+//     sample time; when it runs out the canards go back to neutral unless the
+//     command is repeated, so a lost "stop" packet cannot leave a canard
+//     deflected.
+//   - CanardSweep (the ground station's "actuatorTest"): a fixed sequence,
+//     each canard to +kSweepAmplitudeRad then -kSweepAmplitudeRad in turn,
+//     then all four together, kSweepStepUs per step. Only where the owner
+//     allows it (Init); elsewhere the command is ignored. A CanardTest or
+//     CanardTestStop cancels a running sweep.
+// While a test runs its angles are requested every cycle.
 //
 // It never clamps: the Canards subsystem owns every limit, and it refuses test
 // angles once the rocket has left the ground.
@@ -21,9 +28,12 @@ class Canards;
 
 class GroundTest {
  public:
-  explicit GroundTest(Canards& canards) : canards_(canards) {}
+  static constexpr int kSweepSteps = 2 * kNumCanards + 2;
 
-  // Back to neutral, no hold. Call on state entry and exit.
+  // `allowSweep`: whether CanardSweep commands are accepted here.
+  GroundTest(Canards& canards, bool allowSweep) : canards_(canards), allowSweep_(allowSweep) {}
+
+  // Back to neutral, no hold, no sweep. Call on state entry and exit.
   void reset();
 
   // Reads this cycle's commands. Returns true if a test is active, in which
@@ -31,12 +41,20 @@ class GroundTest {
   // canard request this cycle.
   bool update(const Cycle& cycle);
 
-  bool active() const { return active_; }
-  const float* angles() const { return anglesRad_; }  // by canard
+  bool active() const { return active_ || sweeping_; }
+  bool sweeping() const { return sweeping_; }
+  const float* angles() const { return anglesRad_; }  // by canard, current request
+
+  // The angles of sweep step `step` (0 .. kSweepSteps-1), by canard.
+  static void sweepAngles(int step, float out[kNumCanards]);
 
  private:
   Canards& canards_;
-  bool active_ = false;
+  bool allowSweep_;
+  bool active_ = false;  // a CanardTest hold
   uint64_t untilUs_ = 0;
-  float anglesRad_[kNumCanards] = {};
+  bool sweeping_ = false;
+  uint64_t sweepStartUs_ = 0;
+  float heldRad_[kNumCanards] = {};   // CanardTest angles
+  float anglesRad_[kNumCanards] = {}; // what is requested this cycle
 };

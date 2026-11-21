@@ -187,8 +187,16 @@ void test_enable_arriving_on_the_launch_cycle_is_refused() {
   TEST_ASSERT_EQUAL(StateId::Boost, rig.state());
   TEST_ASSERT_TRUE(rig.last().transitioned);
   TEST_ASSERT_FALSE(rig.last().canards.enabled);
-  TEST_ASSERT_FALSE(rig.last().actuators.servoPower);
   TEST_ASSERT_EQUAL_UINT32(1, rig.last().canards.rejectedCommandCount);
+  // Powered all the same (power does not depend on enable), holding zero.
+  TEST_ASSERT_TRUE(rig.last().canards.powered);
+  TEST_ASSERT_TRUE(rig.last().actuators.servoPower);
+  TEST_ASSERT_EQUAL(CanardMode::Neutral, rig.last().canards.mode);
+  // And it stays refused on later cycles.
+  for (int i = 0; i < 5; ++i) {
+    rig.cycle();
+    TEST_ASSERT_FALSE(rig.last().canards.enabled);
+  }
 }
 
 void test_enable_one_cycle_before_launch_is_kept() {

@@ -21,6 +21,42 @@ older repos into it, in the order given in section 10.
 
 ---
 
+## 0. Changes since this was written (2026-11-21)
+
+Steps 1-7 are built and committed on branch `mikayla`. The user then decided
+the following. Where they disagree with the rest of this document, these win.
+
+- **Step 8 is not ours.** Someone else owns the hardware wrappers,
+  telemetry and logging (branches `sd-card`, `telem-but-fake`). Our side stops
+  at the `SensorSource`, `Actuators` and `LogSink` interfaces. Step 9 (bench)
+  waits on that hardware layer.
+- **Servo power:** on from boot, holding 0°, in every state except Chute and
+  Land, including when the canards are disabled or locked out. `CanardsEnable`
+  no longer switches power; it only allows attitude hold to move the canards.
+  Ground tests do not need it.
+- **Canard handedness confirmed** (CH1 → CH3 is clockwise from the tail): the
+  bench calibration rows in `include/VehicleConfig.h` are live.
+- **Envelope cut-off is debounced** (`FlightConfig::kCutoffHoldUs`).
+- **No denial is counted** for a request the previous state was allowed to make,
+  on the cycle the state changes (e.g. Control's last attitude hold on
+  Control → Coast).
+- **Control's speed exit arms** only after speed ≥ `kControlEndSpeed` in the
+  state (confirmed). Any launch that does not come straight from PreFlight
+  locks the canards out (confirmed). No safeguard for a never-detected launch.
+- **Ground-station commands** (`ground/telemetry_gui.py`):
+  `armFlight` = EnterPreFlight + CanardsEnable, ground only;
+  `actuatorTest` = the GroundTest sweep, Init only. See
+  `src/Subsystems/Comms/GroundCommands.h`.
+- **Estimator:** `src/Estimator/PadAlignedEstimator` wraps the owner's
+  `SimpleEstimator` (through `SimpleEstimatorBackend`, board only), adding
+  IMU dead-reckoned velocity and barometric altitude. `simple_estimator.h`
+  gained one getter, `get_orientation_quaternion()`, with the user's approval.
+- **Flight clock:** states, debounces and ground-test holds run on a monotonic
+  clock derived from the IMU sample time (`FlightComputer::cycle`), so one bad
+  timestamp cannot complete a debounce or fire a timeout.
+
+---
+
 ## 1. Scope and ownership
 
 | Area | Owner | What we do |

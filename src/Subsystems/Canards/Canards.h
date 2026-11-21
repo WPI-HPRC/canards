@@ -17,9 +17,11 @@
 //     PreFlight (a launch from Init), attitude hold is refused for the rest of
 //     the flight.
 //
-//  2. POWER. Servo power is on only if the canards are enabled AND the state is
-//     not Chute or Land. Canards start DISABLED at boot. Not powered means mode
-//     Off, centre pulses, and the servo loop reset.
+//  2. POWER. Servo power is on from boot, holding 0 deg, in every state but
+//     Chute and Land (user decision 2026-11-21). Not powered means mode Off,
+//     centre pulses, and the servo loop reset. ENABLE does not switch power:
+//     it only allows attitude hold to move the canards. Canards start
+//     DISABLED; CanardsDisable returns them to a powered 0 deg hold.
 //
 //  3. REQUEST. No request -> neutral. Two requests of different kinds in one
 //     cycle -> neutral, counted as denied (PROPOSAL). A request the permission
@@ -31,7 +33,9 @@
 //         attitude hold   -      -       -      ok     -     -     -
 //
 //     The state used is the one in force AFTER this cycle's transition, so a
-//     test requested on the cycle launch is detected is refused.
+//     test requested on the cycle launch is detected is refused. On the cycle
+//     the state changes, a request the old state was allowed to make is not
+//     counted as denied (it is that state's last request, not a fault).
 //
 //  4. SAFETY. While any system safety fault is active, the result is neutral.
 //
@@ -43,9 +47,10 @@
 //     FlightConfig::kCanardLimitRad.
 //
 //  7. ENVELOPE CUT-OFF. While attitude hold is permitted and navigation is
-//     valid, tilt > kMaxTiltRad or |pitch or yaw rate| > kMaxPitchYawRate
-//     latches neutral for the rest of the flight. It is only evaluated then,
-//     so a rocket lying on its side on the pad cannot trip it.
+//     valid, tilt > kMaxTiltRad or |pitch or yaw rate| > kMaxPitchYawRate,
+//     held for kCutoffHoldUs over consecutive attitude-hold cycles, latches
+//     neutral for the rest of the flight. It is only evaluated then, so a
+//     rocket lying on its side on the pad cannot trip it.
 //
 // The subsystem never reads a clock: time enters through Cycle only.
 
@@ -53,8 +58,10 @@
 
 #include "Actuators.h"
 #include "AttitudeControl/AttitudeController.h"
+#include "FlightConfig.h"
 #include "Frames.h"
 #include "ServoControl/ServoControl.h"
+#include "StateMachine/Persistence.h"
 #include "StateMachine/State.h"
 #include "StateMachine/StateId.h"
 #include "Subsystems/Comms/Command.h"
@@ -76,7 +83,7 @@ enum class CanardRequest : uint8_t {
 
 // Why an attitude-hold request produced neutral this cycle. Bit mask.
 namespace CanardGate {
-constexpr uint16_t kNotEnabled = 1u << 0;        // canards disabled (servo power off)
+constexpr uint16_t kNotEnabled = 1u << 0;        // canards not enabled for control
 constexpr uint16_t kLockedOut = 1u << 1;         // launch skipped PreFlight
 constexpr uint16_t kSafetyFault = 1u << 2;       // a system safety fault is active
 constexpr uint16_t kNavInvalid = 1u << 3;        // attitude or speed invalid or stale
@@ -88,8 +95,8 @@ constexpr uint16_t kNonFinite = 1u << 7;         // reference not finite or not 
 
 struct CanardsStatus {
   CanardMode mode = CanardMode::Off;
-  bool enabled = false;        // CanardsEnable accepted and not since disabled
-  bool powered = false;        // servo power commanded on this cycle
+  bool enabled = false;        // CanardsEnable accepted and not since disabled: attitude hold may act
+  bool powered = false;        // servo power commanded on this cycle (on except in Chute and Land)
   bool lockedOut = false;      // attitude hold refused for the rest of the flight
   bool cutoffLatched = false;  // envelope cut-off tripped
 
@@ -146,6 +153,8 @@ class Canards {
   float testRad_[kNumCanards] = {};
 
   bool enabled_ = false;
+  Persistence cutoff_{FlightConfig::kCutoffHoldUs};
+  StateId lastState_ = StateId::Init;            // the state seen by the previous periodic()
   bool enabledThisCycle_ = false;  // enabled by a command since the last periodic()
   bool wasPowered_ = false;
   bool inFlight_ = false;                        // a flight state has been seen

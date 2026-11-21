@@ -461,9 +461,11 @@ void test_nominal_flight_canards_by_state() {
     TEST_ASSERT_FALSE(s.lockedOut);
     TEST_ASSERT_FALSE(s.cutoffLatched);
     switch (r.state) {
-      case StateId::Init:  // not yet enabled
-        EXPECT_MODE(CanardMode::Off, s.mode);
-        TEST_ASSERT_FALSE(r.actuators.servoPower);
+      case StateId::Init:  // not yet enabled, but powered from boot, holding zero
+        TEST_ASSERT_FALSE(s.enabled);
+        EXPECT_MODE(CanardMode::Neutral, s.mode);
+        TEST_ASSERT_TRUE(s.powered);
+        TEST_ASSERT_TRUE(r.actuators.servoPower);
         TEST_ASSERT_TRUE(atCentre(r.actuators));
         break;
       case StateId::PreFlight:
@@ -503,14 +505,18 @@ void test_nominal_flight_canards_by_state() {
   // Control lasted from t.control to t.coast; most of it above the control speed.
   TEST_ASSERT_TRUE(controlling > (t.slow - t.peak) / kPeriodUs);
 
-  // The only denied request is Control's last attitude-hold request, on the
-  // cycle it hands over to Coast (the permission check uses the state in
-  // force after the transition).
-  TEST_ASSERT_EQUAL_UINT32(1, h.fc().canards().status().deniedCount);
+  // Nothing is ever denied. On the cycle Control hands over to Coast its last
+  // attitude-hold request ends at neutral (the permission check uses the
+  // state in force after the transition), but it is not a denial: Control was
+  // allowed to make it.
+  TEST_ASSERT_EQUAL_UINT32(0, h.fc().canards().status().deniedCount);
   const CycleRecord& handover = h.recordAt(t.coast);
-  TEST_ASSERT_EQUAL_UINT32(1, handover.canards.deniedCount);
-  TEST_ASSERT_TRUE(handover.canards.lastDenied == CanardRequest::AttitudeHold);
-  TEST_ASSERT_EQUAL_UINT32(0, h.recordAt(t.coast - kPeriodUs).canards.deniedCount);
+  EXPECT_STATE(StateId::Coast, handover.state);
+  TEST_ASSERT_TRUE(handover.canards.request == CanardRequest::AttitudeHold);
+  EXPECT_MODE(CanardMode::Neutral, handover.canards.mode);
+  TEST_ASSERT_TRUE(atCentre(handover.actuators));
+  TEST_ASSERT_EQUAL_UINT32(0, handover.canards.deniedCount);
+  TEST_ASSERT_TRUE(handover.canards.lastDenied == CanardRequest::None);
 }
 
 // ===========================================================================
@@ -601,7 +607,7 @@ void test_null_estimator_every_transition_falls_back_to_its_timeout() {
 // Ground tests and canard commands through the FlightComputer
 // ===========================================================================
 
-void test_ground_test_moves_the_canards_on_the_pad_and_is_refused_on_the_launch_cycle() {
+void test_ground_test_moves_the_canards_on_the_pad_and_ends_at_neutral_on_the_launch_cycle() {
   Harness h;
   const Timeline& t = h.script.t;
   checkScript(t);
@@ -610,7 +616,7 @@ void test_ground_test_moves_the_canards_on_the_pad_and_is_refused_on_the_launch_
   const uint64_t testInPreFlight = t.command + samples(10);
   const uint64_t stop = t.command + samples(30);
   TEST_ASSERT_TRUE(stop < t.launch);
-  h.schedule(t.start + samples(2), makeCommand(CommandType::CanardsEnable));
+  // Never enabled: ground tests do not need it.
   h.schedule(testInInit, makeTestCommand(-1, angle));
   h.schedule(t.command, makeCommand(CommandType::EnterPreFlight));
   h.schedule(testInPreFlight, makeTestCommand(1, -angle));
@@ -624,6 +630,7 @@ void test_ground_test_moves_the_canards_on_the_pad_and_is_refused_on_the_launch_
   for (uint64_t time = testInInit; time <= t.command; time += kPeriodUs) {
     const CycleRecord& r = h.recordAt(time);
     EXPECT_MODE(CanardMode::Testing, r.canards.mode);
+    TEST_ASSERT_FALSE(r.canards.enabled);
     TEST_ASSERT_FALSE(atCentre(r.actuators));
     TEST_ASSERT_EQUAL_FLOAT(angle, r.canards.commandRad[0]);
   }
@@ -644,13 +651,15 @@ void test_ground_test_moves_the_canards_on_the_pad_and_is_refused_on_the_launch_
   TEST_ASSERT_EQUAL_UINT32(0, h.recordAt(t.boost - kPeriodUs).canards.deniedCount);
 
   // The launch cycle: PreFlight asked for the test, Boost (now in force)
-  // refuses it.
+  // does not allow it, so neutral. PreFlight was allowed to ask, so it is not
+  // a denial.
   const CycleRecord& launch = h.recordAt(t.boost);
   EXPECT_STATE(StateId::Boost, launch.state);
   TEST_ASSERT_TRUE(launch.canards.request == CanardRequest::TestAngles);
   EXPECT_MODE(CanardMode::Neutral, launch.canards.mode);
-  TEST_ASSERT_EQUAL_UINT32(1, launch.canards.deniedCount);
-  TEST_ASSERT_TRUE(launch.canards.lastDenied == CanardRequest::TestAngles);
+  TEST_ASSERT_EQUAL_UINT32(0, launch.canards.deniedCount);
+  TEST_ASSERT_TRUE(launch.canards.lastDenied == CanardRequest::None);
+  TEST_ASSERT_TRUE(launch.actuators.servoPower);
   TEST_ASSERT_TRUE(atCentre(launch.actuators));
   EXPECT_MODE(CanardMode::Neutral, h.last().canards.mode);
 }
@@ -665,15 +674,23 @@ void test_canards_enable_in_flight_is_rejected() {
   h.runThrough(t.coast);
 
   TEST_ASSERT_EQUAL_UINT32(2, h.fc().canards().status().rejectedCommandCount);
+  bool sawHoldRefused = false;
   for (const CycleRecord& r : h.log.records) {
+    // Powered from boot to Coast, holding zero: never enabled, never moved.
     TEST_ASSERT_FALSE(r.canards.enabled);
-    TEST_ASSERT_FALSE(r.canards.powered);
-    TEST_ASSERT_FALSE(r.actuators.servoPower);
+    TEST_ASSERT_TRUE(r.canards.powered);
+    TEST_ASSERT_TRUE(r.actuators.servoPower);
+    TEST_ASSERT_TRUE(r.canards.mode != CanardMode::Controlling);
     TEST_ASSERT_TRUE(atCentre(r.actuators));
+    if (r.state == StateId::Control && r.canards.request == CanardRequest::AttitudeHold) {
+      TEST_ASSERT_TRUE((r.canards.gates & CanardGate::kNotEnabled) != 0);
+      sawHoldRefused = true;
+    }
   }
+  TEST_ASSERT_TRUE(sawHoldRefused);
 }
 
-void test_canards_disable_in_control_drops_power() {
+void test_canards_disable_in_control_holds_zero_powered() {
   Harness h;
   const Timeline& t = h.script.t;
   checkScript(t);
@@ -687,10 +704,14 @@ void test_canards_disable_in_control_drops_power() {
   for (const CycleRecord& r : h.log.records) {
     if (r.frame.timeUs < t.peak) continue;
     TEST_ASSERT_FALSE(r.canards.enabled);
-    TEST_ASSERT_FALSE(r.canards.powered);
-    EXPECT_MODE(CanardMode::Off, r.canards.mode);
-    TEST_ASSERT_FALSE(r.actuators.servoPower);
+    TEST_ASSERT_TRUE(r.canards.powered);
+    EXPECT_MODE(CanardMode::Neutral, r.canards.mode);
+    TEST_ASSERT_TRUE(r.actuators.servoPower);
     TEST_ASSERT_TRUE(atCentre(r.actuators));
+    if (r.state == StateId::Control) {
+      TEST_ASSERT_TRUE(r.canards.request == CanardRequest::AttitudeHold);
+      TEST_ASSERT_EQUAL_HEX16(CanardGate::kNotEnabled, r.canards.gates);
+    }
   }
   // The flight goes on as before.
   EXPECT_STATE(StateId::Coast, h.recordAt(t.coast).state);
@@ -867,9 +888,9 @@ int main() {
   RUN_TEST(test_nominal_flight_canards_by_state);
   RUN_TEST(test_launch_from_init_reaches_every_state_with_the_canards_locked_out);
   RUN_TEST(test_null_estimator_every_transition_falls_back_to_its_timeout);
-  RUN_TEST(test_ground_test_moves_the_canards_on_the_pad_and_is_refused_on_the_launch_cycle);
+  RUN_TEST(test_ground_test_moves_the_canards_on_the_pad_and_ends_at_neutral_on_the_launch_cycle);
   RUN_TEST(test_canards_enable_in_flight_is_rejected);
-  RUN_TEST(test_canards_disable_in_control_drops_power);
+  RUN_TEST(test_canards_disable_in_control_holds_zero_powered);
   RUN_TEST(test_imu_gap_forces_neutral_for_that_cycle_and_control_resumes);
   RUN_TEST(test_time_going_backwards_is_flagged_and_does_not_crash);
   RUN_TEST(test_more_commands_than_fit_in_one_cycle_are_spread_over_later_cycles_in_order);

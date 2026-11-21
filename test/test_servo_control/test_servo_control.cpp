@@ -1118,29 +1118,56 @@ void test_neutral_command_is_the_centre_pulse() {
 // 3. The configuration as shipped
 // ---------------------------------------------------------------------------
 
-// VehicleConfig marks every servo row NOT calibrated until the canard
-// numbering is confirmed on the airframe, so the flight program cannot move a
-// canard off neutral. When the rows are confirmed and set to calibrated, this
-// test is meant to fail: replace it then, do not weaken it.
-void test_shipped_config_is_uncalibrated_and_only_sends_centre_pulses() {
+// VehicleConfig marks every servo row calibrated now that the canard
+// handedness is confirmed (2026-11-21), so the flight program really moves the
+// canards. On every channel a longer pulse turns the canard anticlockwise seen
+// from the tail, so a POSITIVE canard command must give a SHORTER pulse, and
+// the pulse limits must hold whatever is commanded.
+void test_shipped_config_is_calibrated_and_a_positive_canard_shortens_its_pulse() {
   const ServoConfig& config = VehicleConfig::kServoConfig;
-  for (int ch = 0; ch < kNumCanards; ++ch) TEST_ASSERT_FALSE(config.channels[ch].calibrated);
+  for (int ch = 0; ch < kNumCanards; ++ch) TEST_ASSERT_TRUE(config.channels[ch].calibrated);
+  {
+    const ServoControl servo(config);
+    TEST_ASSERT_TRUE(servo.allCalibrated());
+  }
 
-  Rig rig(config);
-  TEST_ASSERT_FALSE(rig.servo.allCalibrated());
+  // Each canard alone, both ways: only its own channel moves, the right way.
+  const float small = 2.0f * kDeg;
+  const float signs[] = {1.0f, -1.0f};
+  for (int canard = 0; canard < kNumCanards; ++canard) {
+    for (float sign : signs) {
+      Rig rig(config);
+      float command[kNumCanards] = {};
+      command[canard] = sign * small;
+      rig.cycle(command, 0.005f, noFeedback());
+      const int moved = config.channelOfCanard[canard];
+      for (int ch = 0; ch < kNumCanards; ++ch) {
+        const float centre = config.channels[ch].centerPulseUs;
+        if (ch != moved) {
+          TEST_ASSERT_EXACT_FLOAT(centre, rig.pulseUs[ch]);
+        } else if (sign > 0.0f) {
+          TEST_ASSERT_TRUE_MESSAGE(rig.pulseUs[ch] < centre, "positive canard: shorter pulse");
+        } else {
+          TEST_ASSERT_TRUE_MESSAGE(rig.pulseUs[ch] > centre, "negative canard: longer pulse");
+        }
+      }
+    }
+  }
+
+  // Anything commanded, with or without encoders: inside the pulse limits.
   for (int n = 0; n < 80; ++n) {
-    const float swing = 7.5f * kDeg * std::sin(0.4f * static_cast<float>(n));
-    const float command[kNumCanards] = {swing, -swing, 7.5f * kDeg, -7.5f * kDeg};
-    // Valid, moving encoders: they must not be believed without a calibration.
+    Rig rig(config);
+    const float swing = 30.0f * kDeg * std::sin(0.4f * static_cast<float>(n));
+    const float command[kNumCanards] = {swing, -swing, 90.0f * kDeg, -90.0f * kDeg};
     ActuatorFeedback feedback;
     for (int ch = 0; ch < kNumCanards; ++ch) {
       feedback.encoderAngleRad[ch] = std::fmod(0.3f * static_cast<float>(n + ch), 2.0f * kPi);
-      feedback.encoderValid[ch] = true;
+      feedback.encoderValid[ch] = n % 2 == 0;
     }
-    rig.cycle(command, 0.005f, feedback);
-    TEST_ASSERT_FALSE(rig.angles.measured);
+    for (int k = 0; k < 5; ++k) rig.cycle(command, 0.005f, feedback);
     for (int ch = 0; ch < kNumCanards; ++ch) {
-      TEST_ASSERT_EXACT_FLOAT(config.channels[ch].centerPulseUs, rig.pulseUs[ch]);
+      TEST_ASSERT_TRUE(rig.pulseUs[ch] >= config.channels[ch].minPulseUs);
+      TEST_ASSERT_TRUE(rig.pulseUs[ch] <= config.channels[ch].maxPulseUs);
     }
   }
 }
@@ -1218,7 +1245,7 @@ int main(int, char**) {
   RUN_TEST(test_center_pulses_and_all_calibrated);
   RUN_TEST(test_neutral_command_is_the_centre_pulse);
 
-  RUN_TEST(test_shipped_config_is_uncalibrated_and_only_sends_centre_pulses);
+  RUN_TEST(test_shipped_config_is_calibrated_and_a_positive_canard_shortens_its_pulse);
   RUN_TEST(test_shipped_channel_map_is_usable);
 
   return UNITY_END();

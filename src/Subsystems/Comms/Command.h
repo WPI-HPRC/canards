@@ -15,7 +15,8 @@ enum class CommandType : uint8_t {
   CanardsEnable,   // accepted only on the ground (Init, PreFlight)
   CanardsDisable,  // always accepted
   CanardTest,      // ground test: move `canard` to `angleRad`
-  CanardTestStop,  // ground test: back to neutral
+  CanardTestStop,  // ground test: back to neutral (also stops a sweep)
+  CanardSweep,     // actuator test: the fixed sweep of GroundTest, Init only
 };
 
 struct Command {

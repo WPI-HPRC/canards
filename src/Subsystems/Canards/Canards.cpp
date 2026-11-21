@@ -111,13 +111,20 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
   // Measured every cycle, also unpowered, so the log always has the angles.
   servoControl_.measure(feedback, status_.angles);
 
-  // 2. Power.
-  const bool powered = enabled_ && servoPowerAllowed(currentState);
+  // 2. Power: on from boot, holding 0 deg, in every state but Chute and
+  // Land. Enabling only decides whether attitude hold may move the canards.
+  const bool powered = servoPowerAllowed(currentState);
   status_.enabled = enabled_;
   status_.powered = powered;
 
   // 3. Resolve the request. Denials are counted whether or not the servos
-  // are powered, so a forbidden request always shows up in the log.
+  // are powered, so a forbidden request always shows up in the log. On the
+  // cycle the state changes, a request the old state was allowed to make
+  // still ends at neutral but is not counted: it is the old state's last
+  // request, not a fault (e.g. Control's last attitude hold on Control->Coast).
+  const bool stateChanged = currentState != lastState_;
+  const StateId previousState = lastState_;
+  lastState_ = currentState;
   CanardRequest effective = request_;
   if (effective == CanardRequest::None) {
     effective = CanardRequest::Neutral;
@@ -126,17 +133,17 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
     status_.lastDenied = CanardRequest::Conflict;
     effective = CanardRequest::Neutral;
   } else if (!permitted(effective, currentState)) {
-    ++status_.deniedCount;
-    status_.lastDenied = effective;
+    if (!(stateChanged && permitted(effective, previousState))) {
+      ++status_.deniedCount;
+      status_.lastDenied = effective;
+    }
     effective = CanardRequest::Neutral;
   }
 
   if (!powered) {
     if (wasPowered_) servoControl_.reset();
     wasPowered_ = false;
-    // Gates describe a permitted attitude hold only. One the table refused
-    // is already a denial, whether or not the servos are powered.
-    if (effective == CanardRequest::AttitudeHold && !enabled_) status_.gates = CanardGate::kNotEnabled;
+    cutoff_.reset();
     status_.mode = CanardMode::Off;
     zero(status_.commandRad);
     out.servoPower = false;
@@ -148,6 +155,7 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
 
   float command[kNumCanards] = {};
   CanardMode mode = CanardMode::Neutral;
+  bool cutoffEvaluated = false;
 
   if (effective == CanardRequest::TestAngles) {
     // 4-5. Safety first, then the linkage failsafe limit.
@@ -163,6 +171,7 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
     // 6-7. Every gate is evaluated, so the status shows all that are closed.
     const Navigation& nav = cycle.nav;
     uint16_t gates = 0;
+    if (!enabled_) gates |= CanardGate::kNotEnabled;
     if (status_.lockedOut) gates |= CanardGate::kLockedOut;
     if (safetyActive) gates |= CanardGate::kSafetyFault;
     if (!nav.attitudeValid() || !nav.speedValid()) gates |= CanardGate::kNavInvalid;
@@ -171,13 +180,15 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
 
     // The cut-off only looks at a valid attitude, and only here, where
     // attitude hold is allowed: a rocket on its side on the pad never trips it.
+    // Debounced, so one bad estimator sample cannot end control for the flight.
+    bool outside = false;
     if (nav.attitudeValid()) {
       const Vec3& rate = nav.bodyRate();
-      if (nav.tilt() > FlightConfig::kMaxTiltRad || std::fabs(rate.y) > FlightConfig::kMaxPitchYawRate ||
-          std::fabs(rate.z) > FlightConfig::kMaxPitchYawRate) {
-        status_.cutoffLatched = true;
-      }
+      outside = nav.tilt() > FlightConfig::kMaxTiltRad || std::fabs(rate.y) > FlightConfig::kMaxPitchYawRate ||
+                std::fabs(rate.z) > FlightConfig::kMaxPitchYawRate;
     }
+    if (cutoff_.update(outside, cycle.timeUs)) status_.cutoffLatched = true;
+    cutoffEvaluated = true;
     if (status_.cutoffLatched) gates |= CanardGate::kCutoff;
 
     if (gates == 0) {
@@ -201,6 +212,9 @@ void Canards::periodic(const Cycle& cycle, StateId currentState, bool safetyActi
     }
     status_.gates = gates;
   }
+
+  // A cut-off run only counts over consecutive attitude-hold cycles.
+  if (!cutoffEvaluated) cutoff_.reset();
 
   status_.mode = mode;
   if (mode == CanardMode::Neutral) zero(command);

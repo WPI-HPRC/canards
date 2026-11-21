@@ -13,7 +13,7 @@ class Navigation;
 // No timeout: the rocket may wait on the pad.
 class PreFlightState final : public State {
  public:
-  PreFlightState(Canards& canards, Navigation& nav) : canards_(canards), nav_(nav), groundTest_(canards) {}
+  PreFlightState(Canards& canards, Navigation& nav) : canards_(canards), nav_(nav), groundTest_(canards, /*allowSweep=*/false) {}
   void init(const Cycle&) override;
   void execute(const Cycle& cycle) override;
   void end(const Cycle&) override;
