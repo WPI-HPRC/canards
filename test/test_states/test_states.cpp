@@ -34,6 +34,7 @@
 #include "StateMachine/states/InitState.h"
 #include "StateMachine/states/LandState.h"
 #include "StateMachine/states/LaunchDetector.h"
+#include "StateMachine/Morse.h"
 #include "StateMachine/states/PreFlightState.h"
 #include "Subsystems/Canards/Canards.h"
 #include "Subsystems/Comms/Command.h"
@@ -464,6 +465,71 @@ void test_preflight_reinitialises_again_on_a_repeated_enter_preflight() {
   }
   rig.step();
   TEST_ASSERT_EQUAL_UINT32(3, rig.estimator.reinitializeCount());
+}
+
+// The Morse greeting: the encoding, then the state playing it.
+void test_morse_timing_follows_itu() {
+  // E = .  T = -  ; letter gap 3, word gap 7.
+  TEST_ASSERT_EQUAL_UINT(1, morse::totalUnits("E"));
+  TEST_ASSERT_EQUAL_UINT(1 + 3 + 3, morse::totalUnits("ET"));
+  TEST_ASSERT_EQUAL_UINT(1 + 7 + 3, morse::totalUnits("E T"));
+  TEST_ASSERT_EQUAL_UINT(115, morse::totalUnits("LOVE U SHARON"));
+  TEST_ASSERT_EQUAL_UINT(0, morse::totalUnits(""));
+  // "ET": on, off off off, on on on.
+  const bool expected[] = {true, false, false, false, true, true, true, false};
+  for (unsigned u = 0; u < 8; ++u) TEST_ASSERT_EQUAL(expected[u], morse::isOn("ET", u));
+  // The real greeting fits the 15 s budget.
+  TEST_ASSERT_TRUE(morse::totalUnits("LOVE U SHARON") * fc::kPreFlightMorseUnitUs <= 15 * fc::kUsPerSecond);
+}
+
+void test_preflight_greeting_plays_then_realigns_and_a_test_command_ends_it() {
+  Rig rig;
+  PreFlightState greet{rig.canards, rig.nav, "ET"};  // 7 units: on, off x3, on x3
+  rig.current = StateId::PreFlight;
+  Cycle entry{rig.timeUs, 0.0f, 0, rig.nav, rig.commands};
+  greet.init(entry);
+  const uint64_t start = rig.timeUs;
+  const uint32_t before = rig.estimator.reinitializeCount();
+  auto stepGreet = [&](uint64_t t) {
+    return rig.runCycle(t, [&](const Cycle& c) {
+      greet.execute(c);
+      return greet.next(c);
+    });
+  };
+  const uint64_t unit = fc::kPreFlightMorseUnitUs;
+  for (unsigned u = 0; u < 7; ++u) {
+    const uint64_t t = start + u * unit + unit / 2;  // the middle of unit u
+    EXPECT_STATE(StateId::PreFlight, stepGreet(t));
+    const bool on = morse::isOn("ET", u);
+    TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Testing);
+    for (int i = 0; i < kNumCanards; ++i) {
+      TEST_ASSERT_EQUAL_FLOAT(on ? fc::kPreFlightMorseAngleRad : 0.0f, rig.status().commandRad[i]);
+    }
+  }
+  // Ended: neutral, and the pad alignment starts again.
+  stepGreet(start + 7 * unit + unit / 2);
+  TEST_ASSERT_TRUE(rig.status().mode == CanardMode::Neutral);
+  rig.step();
+  TEST_ASSERT_TRUE(rig.estimator.reinitializeCount() > before);
+
+  // A second greeting, ended early by a test command.
+  Rig rig2;
+  PreFlightState greet2{rig2.canards, rig2.nav, "LOVE U SHARON"};
+  rig2.current = StateId::PreFlight;
+  Cycle entry2{rig2.timeUs, 0.0f, 0, rig2.nav, rig2.commands};
+  greet2.init(entry2);
+  auto step2 = [&]() {
+    return rig2.runCycle(rig2.timeUs + kStepUs, [&](const Cycle& c) {
+      greet2.execute(c);
+      return greet2.next(c);
+    });
+  };
+  step2();
+  TEST_ASSERT_TRUE(rig2.status().mode == CanardMode::Testing);
+  rig2.push(makeCommand(CommandType::CanardTestStop));
+  step2();
+  step2();
+  TEST_ASSERT_TRUE(rig2.status().mode == CanardMode::Neutral);
 }
 
 void test_preflight_stand_down_goes_to_init_on_the_command_cycle() {
@@ -1308,5 +1374,7 @@ int main() {
   RUN_TEST(test_a_single_canard_test_after_a_sweep_starts_from_neutral);
   RUN_TEST(test_sweep_replaces_a_running_hold_and_a_repeat_restarts_it);
   RUN_TEST(test_sweep_is_cleared_when_init_is_left);
+  RUN_TEST(test_morse_timing_follows_itu);
+  RUN_TEST(test_preflight_greeting_plays_then_realigns_and_a_test_command_ends_it);
   return UNITY_END();
 }

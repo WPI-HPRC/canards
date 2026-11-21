@@ -60,6 +60,7 @@ class FlightComputer {
   const Canards& canards() const { return canards_; }
   const SafetyMonitor& safety() const { return safety_; }
   const ControlState& controlState() const { return control_; }
+  const PreFlightState& preFlightState() const { return preFlight_; }
   // A ground-station actuator test (sweep) is running in Init.
   bool sweepActive() const { return state() == StateId::Init && init_.sweeping(); }
   const CycleRecord& lastRecord() const { return record_; }

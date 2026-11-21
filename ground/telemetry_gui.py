@@ -163,6 +163,17 @@ COMMANDS = [
 
 SIMULATED_PORT = "SIMULATED"
 
+# GNC GO / NO-GO: the flight program's "gnc_go" and "nogo" columns. The bits
+# must match src/Safety/GoNoGo.h.
+NOGO_REASONS = [
+    (1, "not armed"), (2, "greeting running"), (4, "nav not ready"), (8, "sensor/SD down"),
+    (16, "safety fault"), (32, "canards not ready"), (64, "tilted"), (128, "encoder bad"),
+]
+
+
+def nogo_text(bits: int) -> str:
+    return ", ".join(name for bit, name in NOGO_REASONS if bits & bit) or "?"
+
 # SD replay (--usb only). "replay <N> [servos]" over the USB console makes the
 # board restart itself into the replay (src/main.cpp, requestReplayReboot).
 BOARD_VID, BOARD_PID = 0x0483, 0x5740     # the board's USB CDC port (STM32)
@@ -570,6 +581,12 @@ class TelemetryApp:
         left = ttk.Frame(body, padding=4)
         body.add(left, weight=1)
 
+        # GNC GO / NO-GO, big: shown once the rocket sends "gnc_go".
+        self.go_label = tk.Label(left, text="GNC: -", font=("Helvetica", 20, "bold"),
+                                 fg="white", bg="#777777", pady=6)
+        self.go_label.pack(fill=tk.X, pady=(0, 4))
+        self.last_go = None
+
         cmd_frame = ttk.LabelFrame(left, text="Commands", padding=4)
         cmd_frame.pack(fill=tk.X)
         self.cmd_buttons = []
@@ -948,10 +965,24 @@ class TelemetryApp:
             self.last_seq = seq
 
         self.latest = row
+        self._update_go(row)
         for name, value in row.items():
             self.history.setdefault(name, deque()).append(value)
         self._trim_history()
         self._update_values_table()
+
+    def _update_go(self, row):
+        go, bits = row.get("gnc_go"), row.get("nogo")
+        if not isinstance(go, int) or not isinstance(bits, int):
+            return
+        if go == 1:
+            text, colour = "GNC GO", "#0ca30c"
+        else:
+            text, colour = f"NO-GO: {nogo_text(bits)}", "#d03b3b"
+        self.go_label.configure(text=text, bg=colour)
+        if (go, bits) != self.last_go:
+            self.last_go = (go, bits)
+            self.event(text)
 
     def _trim_history(self):
         """Drops points older than HISTORY_SECONDS (by the X_AXIS value)."""

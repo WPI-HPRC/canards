@@ -69,6 +69,7 @@ extern "C" USBD_HandleTypeDef hUSBD_Device_CDC;
 #include "LiveSensorSource.h"
 #include "MarsActuators.h"
 #include "Platform/RadioLink.h"
+#include "Safety/GoNoGo.h"
 #include "Platform/ReplayPacing.h"
 #include "Platform/SdLineReader.h"
 #include "Platform/SdLogSink.h"
@@ -211,6 +212,32 @@ bool onActuatorTest() {
 // --- Telemetry columns ---------------------------------------------------------
 // Keep a row short: this is airtime, not the SD log.
 uint32_t tlmSeq = 0;
+// GNC GO / NO-GO for the ground station (src/Safety/GoNoGo.h). 0 = GO.
+uint16_t gncNoGo() {
+  const Navigation& nav = flight.navigation();
+  const CanardsStatus& c = flight.canards().status();
+  const ActuatorFeedback& fb = flight.lastRecord().feedback;
+  GoNoGo::Inputs in;
+  in.inPreFlight = flight.state() == StateId::PreFlight && boot.mode == BootMode::Flight;
+  in.greetingRunning = flight.preFlightState().greetingRunning();
+  in.imuValid = nav.imuValid();
+  in.attitudeValid = nav.attitudeValid();
+  in.speedValid = nav.speedValid();
+  in.altitudeValid = nav.altitudeValid();
+  in.imuOk = sensors.status().lsm;
+  in.magOk = sensors.status().lis;
+  in.baroOk = sensors.status().lps;
+  in.sdOk = sdLog.active();
+  in.safetySticky = flight.safety().sticky();
+  in.canardsEnabled = c.enabled;
+  in.lockedOut = c.lockedOut;
+  in.cutoffLatched = c.cutoffLatched;
+  in.powered = c.powered;
+  in.tiltRad = nav.tilt();
+  in.encodersValid = fb.encoderValid[0] && fb.encoderValid[1] && fb.encoderValid[2] && fb.encoderValid[3];
+  return GoNoGo::nogo(in);
+}
+
 const TelemetryColumn tlmColumns[] = {
     TLM_UINT("time_ms", millis()),
     TLM_UINT("seq", tlmSeq++),
@@ -221,6 +248,8 @@ const TelemetryColumn tlmColumns[] = {
     TLM_UINT("locked", flight.canards().status().lockedOut),
     TLM_UINT("cutoff", flight.canards().status().cutoffLatched),
     TLM_UINT("act_test", flight.sweepActive()),
+    TLM_UINT("gnc_go", gncNoGo() == 0),  // 1 = GNC GO (armed, aligned, everything OK)
+    TLM_UINT("nogo", gncNoGo()),         // why not: bits, src/Safety/GoNoGo.h
     TLM_UINT("nav_ok", flight.navigation().imuValid() | flight.navigation().attitudeValid() << 1 |
                            flight.navigation().speedValid() << 2 | flight.navigation().altitudeValid() << 3),
     TLM_FLOAT("speed", flight.navigation().speed(), 1),

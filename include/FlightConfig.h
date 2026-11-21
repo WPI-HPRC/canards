@@ -57,6 +57,23 @@ constexpr float kGroundTestLimitRad = 7.5f * kDegToRad;     // decided: the link
 constexpr float kSweepAmplitudeRad = 5.0f * kDegToRad;      // PLACEHOLDER (user)
 constexpr uint64_t kSweepStepUs = 300 * kUsPerMs;           // PLACEHOLDER (user): 10 steps = 3 s, as in the ground station
 
+// PreFlight greeting: on entering PreFlight (armFlight), all four canards spell
+// this out in Morse, +kPreFlightMorseAngleRad for "on", 0 deg for "off", one
+// unit = kPreFlightMorseUnitUs. "LOVE U SHARON" is 115 units = 13.8 s. The pad
+// alignment starts again when it ends, so the wiggling cannot spoil the gyro
+// bias. A launch or any ground-test command ends it at once. "" turns it off.
+#if defined(CANARDS_NO_PREFLIGHT_MORSE)  // the desktop tests (env native): off
+constexpr const char* kPreFlightMorseText = "";
+#else
+constexpr const char* kPreFlightMorseText = "LOVE U SHARON";
+#endif
+constexpr uint64_t kPreFlightMorseUnitUs = 120 * kUsPerMs;
+constexpr float kPreFlightMorseAngleRad = 5.0f * kDegToRad;
+
+// GNC GO / NO-GO (src/Safety/GoNoGo.h): the most tilt from vertical on the pad
+// that still reads GO.
+constexpr float kGoMaxTiltRad = 15.0f * kDegToRad;          // PLACEHOLDER (GNC / team): rail angle + margin
+
 // --- Canards in flight ------------------------------------------------------
 constexpr float kCanardLimitRad = 4.0f * kDegToRad;         // PLACEHOLDER (GNC): 4 deg; re-check in sim (roll curve reverses near 4.2 deg, team data says 7)
 // Attitude hold gives neutral below this speed (no control authority).
@@ -91,5 +108,6 @@ constexpr uint64_t kMaxImuGapUs = 25 * kUsPerMs;            // PLACEHOLDER (user
 static_assert(kControlEndSpeed > kChuteSpeed, "Control must end above the Chute speed");
 static_assert(kCanardLimitRad <= kGroundTestLimitRad, "flight limit must not exceed the linkage failsafe");
 static_assert(kSweepAmplitudeRad <= kGroundTestLimitRad, "the sweep must stay inside the linkage failsafe");
+static_assert(kPreFlightMorseAngleRad <= kGroundTestLimitRad, "the greeting must stay inside the linkage failsafe");
 
 }  // namespace FlightConfig
