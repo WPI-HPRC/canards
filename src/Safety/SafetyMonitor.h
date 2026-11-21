@@ -49,8 +49,12 @@ class SafetyMonitor {
   uint16_t active() const { return active_; }
   bool anyActive() const { return active_ != 0; }
 
-  // Every fault seen since boot.
+  // Every fault seen since boot (or since clearSticky()).
   uint16_t sticky() const { return sticky_; }
+
+  // Forgets the history ("clearFaults" from the ground station). The active
+  // faults, the only ones that affect the canards, are untouched.
+  void clearSticky() { sticky_ = active_; }
 
  private:
   uint16_t active_ = 0;

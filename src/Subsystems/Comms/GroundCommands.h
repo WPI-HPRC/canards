@@ -15,6 +15,10 @@
 //                 REJECTED once in flight.
 //   actuatorTest  Init only, and not while a sweep is already running: the
 //                 GroundTest sweep. REJECTED otherwise.
+//   rezeroGyro    PreFlight only: re-initialise the estimator (gyro bias, pad
+//                 alignment, altitude reference). Keep the rocket still.
+//   clearFaults   (handled in main.cpp, FlightComputer::clearSafetyHistory):
+//                 on the ground only, forget the sticky safety faults.
 //
 // Wiring in main.cpp, once the FlightComputer runs there:
 //
@@ -43,6 +47,8 @@ class GroundCommands final : public CommandSource {
   // ground/telemetry_gui.py.
   static constexpr const char* kArmFlight = "armFlight";
   static constexpr const char* kActuatorTest = "actuatorTest";
+  static constexpr const char* kRezeroGyro = "rezeroGyro";
+  static constexpr const char* kClearFaults = "clearFaults";
 
   static constexpr size_t kCapacity = 8;
 

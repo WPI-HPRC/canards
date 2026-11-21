@@ -59,6 +59,12 @@ class FlightComputer {
   const Navigation& navigation() const { return navigation_; }
   const Canards& canards() const { return canards_; }
   const SafetyMonitor& safety() const { return safety_; }
+  // On the ground only: forgets the sticky safety faults. False in flight.
+  bool clearSafetyHistory() {
+    if (!isGroundState(state())) return false;
+    safety_.clearSticky();
+    return true;
+  }
   const ControlState& controlState() const { return control_; }
   const PreFlightState& preFlightState() const { return preFlight_; }
   // A ground-station actuator test (sweep) is running in Init.
