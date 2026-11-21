@@ -23,6 +23,10 @@ class SimpleEstimator {
     BLA::Matrix<3, 1> unbiased_gyro(const BLA::Matrix<3, 1> &gyro) const;
     // Returns roll, pitch, yaw in radians.
     BLA::Matrix<3, 1> get_orientation_rpy() const;
+    // The attitude quaternion [w, x, y, z] (Hamilton) that rotates body
+    // vectors into NED. Prefer this to get_orientation_rpy() for control:
+    // nose-up (pitch = 90 deg) is where roll-pitch-yaw is singular.
+    BLA::Matrix<4, 1> get_orientation_quaternion() const { return orientation; }
     BLA::Matrix<3, 1> get_gyro_bias() const;
     // Uses 101325 Pa as reference pressure and subtracts the initialized height.
     float get_height(float pressure_pa) const;
