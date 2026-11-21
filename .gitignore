@@ -7,3 +7,5 @@ lib/telemetry-generated
 tools/flatc
 tools/flatc.exe
 tools/.flatc_version
+ground/ground_logs
+__pycache__/

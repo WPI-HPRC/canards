@@ -17,6 +17,7 @@
 
 #include "sdcard.h"
 #include "max10s.h"
+#include "telemetry.h"
 
 #include "simple_estimator.h"
 
@@ -105,8 +106,7 @@ bool changeSerialPortConfig(RadioConfigTypes::SerialSpeeds baudRate, RadioConfig
 
 void sensorInit();
 void sensorUpdate();
-void radioInit();
-void radioUpdate();
+bool radioInit();
 void gpsInit();
 void gpsUpdate();
 void printSensorSummary();
@@ -124,6 +124,77 @@ struct DeviceStatus {
   int8_t radioCode = -1; // LoRaE22::init(): 0 ok, 1 ok after programming, -1 failed
 };
 DeviceStatus deviceStatus;
+
+// Latest sensor readings, filled by sensorUpdate().
+struct SensorReadings {
+  int32_t lsmAccel[3] = {};  // mg
+  int32_t lsmGyro[3] = {};   // mdps
+  int32_t asmAccel[3] = {};  // mg
+  int32_t asmGyro[3] = {};   // mdps
+  int32_t mag[3] = {};       // mgauss
+  float pressure = 0;        // hPa
+  float temperature = 0;     // C
+  bool lsmOk = false, asmOk = false, lisOk = false, lpsOk = false;
+};
+static SensorReadings readings;
+
+// ------------------------------------------------------------- commands --
+// Set from the ground with the telemetry commands below.
+static bool flightArmed = false;
+static bool actuatorTestActive = false;
+static uint32_t actuatorTestStart = 0;
+static constexpr uint32_t ACTUATOR_TEST_DURATION_MS = 3000;
+
+// "$C,armFlight": arm for flight. Stays armed until reboot.
+static bool onArmFlight() {
+  flightArmed = true;
+  return true;
+}
+
+// "$C,actuatorTest": run the actuator test (see loop()). Refused while armed
+// or while a test is already running.
+static bool onActuatorTest() {
+  if (flightArmed || actuatorTestActive) {
+    return false;
+  }
+  actuatorTestActive = true;
+  actuatorTestStart = millis();
+  return true;
+}
+
+// ------------------------------------------------------------ telemetry --
+// Columns of the radio downlink, sent every Telemetry::ROW_PERIOD_MS. To send
+// something new, add a line here; the header the ground station sees follows
+// the table. Keep it short: this is airtime, not the SD log. A full row should
+// stay well under MAX_MESSAGE_SIZE (232) characters.
+static uint32_t tlmSeq = 0;  // incremented per row, so the ground can see gaps
+static const TelemetryColumn tlmColumns[] = {
+  TLM_UINT("time_ms", millis()),
+  TLM_UINT("seq", tlmSeq++),
+  TLM_UINT("armed", flightArmed),
+  TLM_UINT("act_test", actuatorTestActive),
+
+  TLM_INT("ax_mg", readings.lsmAccel[0]),
+  TLM_INT("ay_mg", readings.lsmAccel[1]),
+  TLM_INT("az_mg", readings.lsmAccel[2]),
+  TLM_INT("gx_mdps", readings.lsmGyro[0]),
+  TLM_INT("gy_mdps", readings.lsmGyro[1]),
+  TLM_INT("gz_mdps", readings.lsmGyro[2]),
+
+  TLM_FLOAT("pressure_hpa", readings.pressure, 2),
+  TLM_FLOAT("temp_c", readings.temperature, 1),
+
+  TLM_UINT("gps_fix", gps.data().gpsLockType),
+  TLM_UINT("gps_sats", gps.data().satellites),
+  TLM_FLOAT("gps_lat_deg", gps.data().lat, 6),
+  TLM_FLOAT("gps_lon_deg", gps.data().lon, 6),
+  TLM_FLOAT("gps_alt_m", gps.data().altMSL, 1),
+  TLM_INT("gps_vel_d_mmps", gps.data().velD),
+
+  // A sensor bit is set while its last read succeeded: 1 LSM, 2 ASM, 4 LIS, 8 LPS.
+  TLM_UINT("sensor_ok", readings.lsmOk | readings.asmOk << 1 | readings.lisOk << 2 | readings.lpsOk << 3),
+};
+static Telemetry telemetry;
 
 
 void setup()
@@ -152,15 +223,21 @@ void setup()
   #endif
   gpsInit();
   sensorInit();
-  // radioInit();
+
+  // Telemetry runs even if the radio fails to configure: the module may still
+  // work with its old config, and boot carries on either way.
+  telemetry.addCommand("armFlight", onArmFlight);
+  telemetry.addCommand("actuatorTest", onActuatorTest);
+  telemetry.begin(radioModule, tlmColumns, radioInit());
+
   printSensorSummary();
 }
 
-unsigned long long counterBufferNotEmpty = 0;
 
 
 
-void radioInit(){
+// Configures the radio. Returns false if it failed; never blocks for good.
+bool radioInit(){
   // build our config
   RadioConfig config;
   config.address = ADDRESS;
@@ -203,28 +280,7 @@ void radioInit(){
     SerialUSB.printf("Radio init: %s (code %d)\n", code >= 0 ? "OK" : "FAILED", code);
   #endif
 
-  
-}
-
-void radioUpdate(){
-   if(radioModule.moduleReady()){
-      // SerialUSB.println("buffer empty and ready!");
-      counterBufferNotEmpty = 0;
-   }
-   else{
-      counterBufferNotEmpty++;
-   }
-
-   uint8_t buffer[3] = {'E', 'X', 'P'};
-   // uint8_t label[3] = {'E', 'X', 'P'};
-   // for(size_t i = 0; i<235;i++){
-   //   buffer[i] = label[i%3];
-   // }
-
-   if((sizeof(buffer) + sizeof(callsign) + 1) * counterBufferNotEmpty < 1000){
-      radioModule.sendMessage(buffer, sizeof(buffer));
-      // SerialUSB.println("help");
-   }
+  return code >= 0;
 }
 
 // Prints one device's init result and returns whether it looks healthy.
@@ -313,19 +369,6 @@ static float magnitude(const int32_t v[3]){
   return sqrtf((float)v[0] * v[0] + (float)v[1] * v[1] + (float)v[2] * v[2]);
 }
 
-// Latest sensor readings, kept for debugPrint().
-struct SensorReadings {
-  int32_t lsmAccel[3] = {};  // mg
-  int32_t lsmGyro[3] = {};   // mdps
-  int32_t asmAccel[3] = {};  // mg
-  int32_t asmGyro[3] = {};   // mdps
-  int32_t mag[3] = {};       // mgauss
-  float pressure = 0;        // hPa
-  float temperature = 0;     // C
-  bool lsmOk = false, asmOk = false, lisOk = false, lpsOk = false;
-};
-static SensorReadings readings;
-
 void sensorUpdate()
 {
   SensorReadings &r = readings;
@@ -409,10 +452,17 @@ void loop()
 {
   digitalToggle(LED_GREEN);
 
-  
   sensorUpdate();
-  // radioUpdate();
   gpsUpdate();
+
+  if (actuatorTestActive) {
+    // TODO: drive the canard servos through their test sweep here.
+    if (millis() - actuatorTestStart >= ACTUATOR_TEST_DURATION_MS) {
+      actuatorTestActive = false;
+    }
+  }
+
+  telemetry.update();
 
   // SerialUSB.println(String(analogRead(MOSFET_CURRENT)));
 
