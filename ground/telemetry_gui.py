@@ -26,12 +26,12 @@ WHAT IT DOES
     * Shows the latest value of every column (and of the DERIVED values).
     * Plots the series listed in PLOTS.
     * One button per entry in COMMANDS.
-    * With --usb: the SD replay panel, the ONLY way to run an SD replay
-      (src/main.cpp, "mode replay"). It copies a flight CSV onto the SD card
-      while the card is in this computer, lists the logs on the board's card,
-      and starts a replay: it waits for the board to power up, sends
-      "mode replay <N> [servos]" in the board's 1.5 s boot window, then shows
-      the replay's telemetry like any other session.
+    * With --usb: the SD replay panel, the ONLY way to run an SD replay. It
+      copies a flight CSV onto the SD card while the card is in this computer,
+      lists the logs on the board's card, and starts a replay: connected, with
+      the board in Init, it sends "replay <N> [servos]"; the board restarts
+      itself into the replay (src/main.cpp) and the GUI reconnects and shows
+      the replay's telemetry. No unplugging.
 
 HOW TO CHANGE IT  (everything is in the CONFIGURATION section below)
     * Plot something else:  edit PLOTS. A series is any column name the rocket
@@ -163,10 +163,11 @@ COMMANDS = [
 
 SIMULATED_PORT = "SIMULATED"
 
-# SD replay (--usb only). The board picks its mode once, at boot: with a USB
-# host connected it waits REPLAY_BOOT_WINDOW_S for one "mode ..." line.
+# SD replay (--usb only). "replay <N> [servos]" over the USB console makes the
+# board restart itself into the replay (src/main.cpp, requestReplayReboot).
 BOARD_VID, BOARD_PID = 0x0483, 0x5740     # the board's USB CDC port (STM32)
-REPLAY_WAIT_S = 120           # how long to wait for the board to power up
+REPLAY_RESTART_S = 5          # the board drops off USB this soon after the command
+REPLAY_WAIT_S = 30            # and comes back within this
 SD_LOG_FOLDER = "logs"        # LOG_FOLDER_NAME in the firmware
 SD_MAX_LOG_IDX = 100          # MAX_LOG_FILE_IDX in src/sdcard.cpp (wraps after it)
 
@@ -435,13 +436,13 @@ def free_log_index(card: Path):
     return None
 
 
-def wait_for_boot_and_send(mode_line: str, status, stop):
-    """Background thread. Waits for the board's USB port to appear (if it is
-    there already, for it to go away first: a reset or power-cycle), opens it
-    at once and sends `mode_line` inside the board's boot window. Returns the
-    open port. `status(text)` reports progress; `stop()` cancels."""
-    def wait(cond, what):
-        end = time.monotonic() + REPLAY_WAIT_S
+def wait_for_restart(status, stop):
+    """Background thread, after the "replay" command went out: waits for the
+    board's USB port to go away (the board restarts itself into the replay)
+    and come back, then opens it. Returns the open port. `status(text)`
+    reports progress; `stop()` cancels."""
+    def wait(cond, timeout_s, what):
+        end = time.monotonic() + timeout_s
         while time.monotonic() < end:
             if stop():
                 raise RuntimeError("cancelled")
@@ -451,24 +452,18 @@ def wait_for_boot_and_send(mode_line: str, status, stop):
             time.sleep(0.02)
         raise RuntimeError(f"timed out waiting for {what}")
 
-    if find_board_port():
-        status("Power-cycle the board now: unplug DC and USB, then plug in USB "
-               "(cold start: the SD card does not come back after a reset)")
-        wait(lambda: not find_board_port(), "the board to power off")
-    status("Waiting for the board to power up (plug in USB)...")
-    port = wait(find_board_port, "the board's USB port")
+    status("Board restarting into the replay...")
+    wait(lambda: not find_board_port(), REPLAY_RESTART_S,
+         "the board to restart (see the events for an ERROR line)")
+    port = wait(find_board_port, REPLAY_WAIT_S, "the board's USB port to come back")
     end = time.monotonic() + 2.0
     while True:
         try:
-            ser = serial.Serial(port, SERIAL_BAUD, timeout=0.1)   # DTR set: the board waits
-            break
+            return serial.Serial(port, SERIAL_BAUD, timeout=0.1)
         except (OSError, serial.SerialException):
             if time.monotonic() > end:
                 raise
             time.sleep(0.02)
-    ser.write((mode_line + "\n").encode())
-    ser.flush()
-    return ser
 
 
 # =============================================================================
@@ -690,7 +685,8 @@ class TelemetryApp:
         self.replay_idx.set(str(idx))
         self.event(f"copied {Path(src).name} to {dest}")
         messagebox.showinfo("Copied", f"Copied to {dest} (log #{idx}).\n\n"
-                            "Eject the card, put it back in the board, then press Start replay.\n\n"
+                            "Eject the card and put it back in the board. Power it up, Connect, "
+                            "then press Start replay.\n\n"
                             "The board's own logs overwrite this number once they count up to it.")
 
     def _list_logs(self):
@@ -713,23 +709,30 @@ class TelemetryApp:
         except ValueError:
             messagebox.showerror("Log number", f"Type the log number to replay (0-{SD_MAX_LOG_IDX}).")
             return
+        if not self.link:
+            messagebox.showerror("Not connected", "Connect to the board first (it must be in Init, not armed).")
+            return
         servos = self.replay_servos.get()
         if servos and not messagebox.askyesno(
                 "Move servos", "The canards will move during the replay.\n\nKeep clear of the canards."):
             return
-        if self.link:
-            self._disconnect()          # the replay needs the port from the board's first moment
-        mode_line = f"mode replay {idx}" + (" servos" if servos else "")
+        command = f"replay {idx}" + (" servos" if servos else "")
+        try:
+            self.link.write((command + "\n").encode())
+        except Exception as e:
+            self.event(f"replay: send failed: {e}")
+            return
+        self.event(f"sent '{command}'")
         self.replay_cancel = False
         self.replay_btn.configure(text="Cancel")
-        self.event(f"replay: waiting to send '{mode_line}'")
+        # Keep reading until the board drops off USB, so an ERROR reply still
+        # shows; the reader thread ends on its own when the port goes away.
 
         def run():
             put = self.replay_queue.put
             try:
-                ser = wait_for_boot_and_send(mode_line, lambda s: put(("status", s)),
-                                             lambda: self.replay_cancel)
-                put(("ready", (ser, mode_line)))
+                ser = wait_for_restart(lambda s: put(("status", s)), lambda: self.replay_cancel)
+                put(("ready", (ser, command)))
             except Exception as e:
                 put(("failed", str(e)))
 
@@ -747,11 +750,13 @@ class TelemetryApp:
                     self.replay_status.set(f"Replay not started: {payload}")
                     self.event(f"replay not started: {payload}")
                 elif kind == "ready":
-                    ser, mode_line = payload
+                    ser, command = payload
+                    if self.link:
+                        self._disconnect()  # the old session, if the reader has not ended it yet
                     self.replay_btn.configure(text="Start replay")
-                    self.replay_status.set(f"Sent '{mode_line}'. Watch the events for 'mode: replay'.")
+                    self.replay_status.set("Board restarted. Watch the events for 'mode: replay'.")
                     self._attach_link(SerialLink(ser.port, ser=ser), ser.port)
-                    self.event(f"sent '{mode_line}'")
+                    self.event(f"reconnected after '{command}'")
         except queue.Empty:
             pass
 
@@ -825,7 +830,10 @@ class TelemetryApp:
         link, self.link = self.link, None   # tells the reader thread to stop
         if self.reader:
             self.reader.join(timeout=1)
-        link.close()
+        try:
+            link.close()
+        except Exception:                # the port may already be gone (board restarted)
+            pass
         self.event("disconnected")
         self.log.close()
         self.log = None

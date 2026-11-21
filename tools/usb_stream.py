@@ -10,7 +10,7 @@ SD replays are started from the ground station only
 
 HOW THE BOARD IS PUT IN A MODE: at the end of its setup(), if a USB host has
 the port open, the board waits up to 1.5 s for one line, "mode stream
-[servos]" or "mode replay <N> [servos] [fast]". With no host, or no line, it
+[servos]". With no host, or no line, it
 boots the normal flight program. Opening the port of a board that is already
 running does nothing, so by default this tool waits for a FRESH enumeration:
 it asks you to reset the board (RESET button or replug), waits for the port to

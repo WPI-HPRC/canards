@@ -8,14 +8,21 @@
 // (envs marsv21_bringup / marsv21_bringup_debug).
 //
 // ------------------------------------------------------------- boot modes --
-// Flight by default. Only if a USB host has the port open (DTR set) at the end
-// of setup() does the board wait, up to kModeWaitMs, for ONE line:
+// Flight by default. Two ways out of it, both chosen before the first cycle:
 //
-//   mode replay <N> [servos] [fast]   replay /logs/canardsLog<N>.csv from SD
-//   mode stream [servos]              take input rows over USB (StreamProtocol.h)
+//   SD replay (started by the ground station, ground/telemetry_gui.py --usb):
+//     the USB console command "replay <N> [servos] [fast]", accepted only in
+//     Init before arming. The board stores the request in RAM_D3 (kept across
+//     a reset), restarts itself, and the next boot replays
+//     /logs/canardsLog<N>.csv from SD. The request is used once: the boot
+//     after that is Flight again. See requestReplayReboot().
 //
-// Anything else, or nothing, is Flight. With no host connected, Flight never
-// waits. The options may come in any order.
+//   USB stream (tools/usb_stream.py): only if a USB host has the port open
+//     (DTR set) at the end of setup(), the board waits up to kModeWaitMs for
+//     ONE line, "mode stream [servos]" (StreamProtocol.h).
+//
+// Anything else, or nothing, is Flight. With no host connected and no stored
+// request, Flight never waits.
 //
 // USB bench console (Flight mode, Platform/UsbConsole.h): while a host has the
 // port open, the telemetry rows also go out over USB, and the ground-station
@@ -280,7 +287,58 @@ bool parseModeLine(char* line, BootOptions& out) {
   return true;
 }
 
+// --- Restart into SD replay ----------------------------------------------------
+// The replay request survives one reset in the top of RAM_D3, just below the
+// DFU word in src/dfu_bootloader.cpp (0x3800FFFC). Nothing else uses RAM_D3.
+// After a power-up the words hold noise, which `check` rejects.
+struct ReplayRequest {
+  uint32_t magic;
+  uint32_t index;
+  uint32_t flags;  // bit 0 servos, bit 1 fast
+  uint32_t check;  // ~(magic ^ index ^ flags)
+};
+constexpr uint32_t kReplayRequestMagic = 0x5E9A7001UL;
+volatile ReplayRequest* const kReplayRequest = reinterpret_cast<volatile ReplayRequest*>(0x3800FFE0UL);
+
+// Stores the request, then resets. Does not return.
+[[noreturn]] void requestReplayReboot(const BootOptions& o) {
+  const uint32_t flags = (o.servos ? 1u : 0u) | (o.fast ? 2u : 0u);
+  kReplayRequest->magic = kReplayRequestMagic;
+  kReplayRequest->index = static_cast<uint32_t>(o.replayIndex);
+  kReplayRequest->flags = flags;
+  kReplayRequest->check = ~(kReplayRequestMagic ^ static_cast<uint32_t>(o.replayIndex) ^ flags);
+  // The core enables the D-cache: push the words to SRAM before the reset.
+  SCB_CleanDCache_by_Addr(const_cast<ReplayRequest*>(kReplayRequest), 32);
+  __DSB();
+  SerialUSB.flush();
+  delay(100);  // let the reply line leave over USB
+  NVIC_SystemReset();
+  while (true) {
+  }
+}
+
+// A stored request, used once. False if there is none.
+bool takeReplayRequest(BootOptions& out) {
+  const uint32_t magic = kReplayRequest->magic;
+  const uint32_t index = kReplayRequest->index;
+  const uint32_t flags = kReplayRequest->flags;
+  const uint32_t check = kReplayRequest->check;
+  kReplayRequest->magic = 0;
+  SCB_CleanDCache_by_Addr(const_cast<ReplayRequest*>(kReplayRequest), 32);
+  __DSB();
+  if (magic != kReplayRequestMagic || check != ~(magic ^ index ^ flags) || index > 100000) return false;
+  BootOptions o;
+  o.mode = BootMode::Replay;
+  o.replayIndex = static_cast<int>(index);
+  o.servos = (flags & 1u) != 0;
+  o.fast = (flags & 2u) != 0;
+  out = o;
+  return true;
+}
+
 BootOptions selectBootMode() {
+  BootOptions o;
+  if (takeReplayRequest(o)) return o;
   // dtr(), not `if (SerialUSB)`: the bool operator delays 10 ms, and with no
   // host the flight path must not wait at all.
   if (!SerialUSB.dtr()) return BootOptions{};
@@ -288,8 +346,8 @@ BootOptions selectBootMode() {
   const uint32_t start = millis();
   while (millis() - start < kModeWaitMs) {
     if (usbLines.readLine(line, sizeof line)) {
-      BootOptions o;
-      return parseModeLine(line, o) ? o : BootOptions{};
+      // Stream only: an SD replay is started with the "replay" command.
+      return parseModeLine(line, o) && o.mode == BootMode::Stream ? o : BootOptions{};
     }
   }
   return BootOptions{};
@@ -361,6 +419,39 @@ void handleConsoleLine(char* line) {
     case GroundReply::Ok: console.reply(stable, "OK"); return;
     case GroundReply::Rejected: console.reply(stable, "REJECTED"); return;
     case GroundReply::Unknown: break;
+  }
+
+  // "replay <N> [servos] [fast]": restart into an SD replay (the ground
+  // station's SD replay panel). Init before arming only, like log download.
+  if (strncmp(name, "replay", 6) == 0 && (name[6] == ' ' || name[6] == '\0')) {
+    if (flight.state() != StateId::Init || watchdogRunning) {
+      SerialUSB.println("---ERROR replay only in Init before arming; power-cycle first---");
+      return;
+    }
+    char modeLine[72];
+    snprintf(modeLine, sizeof modeLine, "mode %s", name);
+    BootOptions o;
+    if (!parseModeLine(modeLine, o) || o.mode != BootMode::Replay) {
+      SerialUSB.println("---ERROR usage: replay <N> [servos] [fast]---");
+      return;
+    }
+    // Check now what the next boot would refuse, so the board does not
+    // restart for nothing.
+    char path[64];
+    sdLogFileName(o.replayIndex, path, sizeof path);
+    const int nextBootLog = sdLogFileIdx() + 1 > 100 ? 0 : sdLogFileIdx() + 1;  // nextLogFileIdx() in sdcard.cpp
+    if (!sdMounted() || !sdFs().exists(path)) {
+      SerialUSB.printf("---ERROR no %s on the SD card---\n", path);
+      return;
+    }
+    if (o.replayIndex == nextBootLog) {
+      SerialUSB.printf("---ERROR log %d is the number the next boot writes to; copy the flight to another---\n",
+                       o.replayIndex);
+      return;
+    }
+    SerialUSB.printf("# restarting into replay %d%s%s\n", o.replayIndex, o.servos ? " servos" : "",
+                     o.fast ? " fast" : "");
+    requestReplayReboot(o);
   }
 
   const bool logCommand = strcmp(name, "list") == 0 || strncmp(name, "dump", 4) == 0;
