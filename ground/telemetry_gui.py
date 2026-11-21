@@ -523,6 +523,252 @@ class SessionLog:
 # GUI
 # =============================================================================
 
+# =============================================================================
+# SYSTEM CHECK: a guided walk through the bench checks, with the avbay in hand
+# =============================================================================
+# Each step: what to do, what to watch, and either an automatic pass (`auto`,
+# true for HOLD_S in a row) or a manual Pass/Fail. `action` is a button that
+# sends a command: ("cmd", name) is a ground-station command (radio or USB),
+# ("usb", line) is a USB console line (USB only), ("replay", N) starts an SD
+# replay (USB only). Values come from the flight program's telemetry columns.
+
+def _v(row, name, default=None):
+    value = row.get(name, default)
+    return value if isinstance(value, (int, float)) else default
+
+
+def _bit(row, name, bit):
+    value = _v(row, name)
+    return value is not None and int(value) & bit != 0
+
+
+CHECK_STEPS = [
+    {"title": "Power, sensors, SD",
+     "do": "Board on, DC connected, avbay still. Not armed.",
+     "watch": ["state", "sensor_ok", "safety", "log_rows", "imu_missed"],
+     "auto": lambda r: _v(r, "state") == 0 and _v(r, "sensor_ok") == 15 and _v(r, "safety") == 0},
+    {"title": "Encoders",
+     "do": "DC on. All four canard encoders should be reading.",
+     "watch": ["nogo", "enc_edges"],
+     "auto": lambda r: _v(r, "nogo") is not None and not _bit(r, "nogo", 128)},
+    {"title": "Nose up",
+     "do": "Hold the avbay nose straight up, still.",
+     "watch": ["fx_g", "fy_g", "fz_g", "tilt_deg"],
+     "auto": lambda r: _v(r, "fx_g", 0) > 0.9 and abs(_v(r, "fy_g", 9)) < 0.2 and abs(_v(r, "fz_g", 9)) < 0.2},
+    {"title": "+y canard up",
+     "do": "Lay it on its side with the +y canard (CH1) pointing straight up. Use 'jitter +y' to find it.",
+     "watch": ["fx_g", "fy_g", "fz_g"],
+     "action": ("usb", "jitter +y", "Jitter +y"),
+     "auto": lambda r: _v(r, "fy_g", 0) > 0.9 and abs(_v(r, "fx_g", 9)) < 0.2 and abs(_v(r, "fz_g", 9)) < 0.2},
+    {"title": "+z canard up",
+     "do": "Roll it so the +z canard (CH3) points straight up.",
+     "watch": ["fx_g", "fy_g", "fz_g"],
+     "action": ("usb", "jitter +z", "Jitter +z"),
+     "auto": lambda r: _v(r, "fz_g", 0) > 0.9 and abs(_v(r, "fx_g", 9)) < 0.2 and abs(_v(r, "fy_g", 9)) < 0.2},
+    {"title": "Roll sign",
+     "do": "Nose up. Spin it CLOCKWISE as seen from the tail.",
+     "watch": ["p_dps", "q_dps", "r_dps"],
+     "auto": lambda r: _v(r, "p_dps", 0) > 20},
+    {"title": "Pitch sign",
+     "do": "Nose up. Tip the nose towards the +z canard.",
+     "watch": ["p_dps", "q_dps", "r_dps"],
+     "auto": lambda r: _v(r, "q_dps", 0) < -20},
+    {"title": "Yaw sign",
+     "do": "Nose up. Tip the nose towards the +y canard.",
+     "watch": ["p_dps", "q_dps", "r_dps"],
+     "auto": lambda r: _v(r, "r_dps", 0) > 20},
+    {"title": "Canard +y (CH1)",
+     "do": "Jitter it. Pass if the canard on the +y side moved.",
+     "watch": ["mode", "act_test"], "action": ("usb", "jitter +y", "Jitter +y")},
+    {"title": "Canard +z (CH3)",
+     "do": "Jitter it. Pass if the canard on the +z side moved.",
+     "watch": ["mode"], "action": ("usb", "jitter +z", "Jitter +z")},
+    {"title": "Canard -y (CH4)",
+     "do": "Jitter it. Pass if the canard opposite +y moved.",
+     "watch": ["mode"], "action": ("usb", "jitter -y", "Jitter -y")},
+    {"title": "Canard -z (CH2)",
+     "do": "Jitter it. Pass if the canard opposite +z moved.",
+     "watch": ["mode"], "action": ("usb", "jitter -z", "Jitter -z")},
+    {"title": "Canard direction",
+     "do": "Watch from the tail. Pass if the +y canard's leading edge turns CLOCKWISE (+5 deg). "
+           "Repeat with each canard from the USB console if you want: canard +z 5, ...",
+     "watch": ["mode"], "action": ("usb", "canard +y 5", "+y to +5 deg")},
+    {"title": "Actuator sweep",
+     "do": "Fingers clear. Each canard +5 then -5 deg in order (+y, +z, -y, -z), then all four. Back to 0.",
+     "watch": ["act_test", "mode"], "action": ("cmd", "actuatorTest", "Actuator test")},
+    {"title": "Arm (PreFlight)",
+     "do": "Nose up and still on the bench. Arm: the canards then spell LOVE U SHARON (14 s).",
+     "watch": ["state", "enabled", "nogo"], "action": ("cmd", "armFlight", "ARM"),
+     "auto": lambda r: _v(r, "state") == 1 and _v(r, "enabled") == 1},
+    {"title": "Canard actuation routine",
+     "do": "Keep it still while the canards spell the message. Passes when the routine ends.",
+     "watch": ["state", "mode", "nogo"],
+     "auto": lambda r: _v(r, "state") == 1 and _v(r, "nogo") is not None and not _bit(r, "nogo", 2)},
+    {"title": "GNC GO",
+     "do": "Nose up, still. The banner should turn green within about a second of the routine ending.",
+     "watch": ["gnc_go", "nogo", "nav_ok", "tilt_deg"],
+     "auto": lambda r: _v(r, "gnc_go") == 1},
+    {"title": "Attitude follows the avbay",
+     "do": "Still armed: tilt it about 10 deg by hand and back. tilt_deg should follow, then return near 0.",
+     "watch": ["tilt_deg", "p_dps", "q_dps", "r_dps"]},
+    {"title": "Flight states (roll-test replay)",
+     "do": "Boost, Control, Coast, Chute and Land only happen in flight, so they are checked by replaying "
+           "the roll test (log 98, 6 rpm clockwise). Fingers clear. Pass if, during Control, all four "
+           "leading edges turn ANTICLOCKWISE from the tail together (against the spin), and the "
+           "canards go limp at Chute.",
+     "watch": ["sim_mode", "state", "mode", "gates"], "action": ("replay", 98, "Replay log 98")},
+]
+HOLD_S = 1.0
+
+
+class SystemCheck:
+    """The System check window. Reads app.latest every 200 ms."""
+
+    def __init__(self, app):
+        self.app = app
+        self.win = tk.Toplevel(app.root)
+        self.win.title("System check")
+        self.results = [None] * len(CHECK_STEPS)   # None, "PASS", "FAIL"
+        self.index = 0
+        self.true_since = None
+
+        side = ttk.Frame(self.win, padding=6)
+        side.pack(side=tk.LEFT, fill=tk.Y)
+        self.steps = tk.Listbox(side, width=30, height=len(CHECK_STEPS), activestyle="none",
+                                exportselection=False)
+        self.steps.pack(fill=tk.Y, expand=True)
+        self.steps.bind("<<ListboxSelect>>", lambda e: self._select(self.steps.curselection()))
+
+        main = ttk.Frame(self.win, padding=10)
+        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.title = tk.Label(main, font=("Helvetica", 18, "bold"), anchor="w")
+        self.title.pack(fill=tk.X)
+        self.do = tk.Label(main, wraplength=460, justify="left", anchor="w", font=("Helvetica", 13))
+        self.do.pack(fill=tk.X, pady=(6, 8))
+        self.watch = tk.Label(main, justify="left", anchor="w", font=("Menlo", 14))
+        self.watch.pack(fill=tk.X)
+        self.state = tk.Label(main, font=("Helvetica", 16, "bold"), anchor="w", pady=6)
+        self.state.pack(fill=tk.X, pady=(8, 0))
+        buttons = ttk.Frame(main)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        self.action_btn = ttk.Button(buttons, command=self._action)
+        self.action_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(buttons, text="Pass", command=lambda: self._mark("PASS")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(buttons, text="Fail", command=lambda: self._mark("FAIL")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(buttons, text="< Back", command=lambda: self._go(self.index - 1)).pack(side=tk.LEFT, padx=(16, 2))
+        ttk.Button(buttons, text="Next >", command=lambda: self._go(self.index + 1)).pack(side=tk.LEFT, padx=2)
+
+        self._go(0)
+        self.app.event("system check started")
+        self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self.win.after(200, self._tick)
+
+    def _refresh_list(self):
+        self.steps.delete(0, tk.END)
+        for i, step in enumerate(CHECK_STEPS):
+            mark = {"PASS": "PASS ", "FAIL": "FAIL ", None: "     "}[self.results[i]]
+            self.steps.insert(tk.END, f"{mark}{i + 1:2d}. {step['title']}")
+            colour = {"PASS": "#0ca30c", "FAIL": "#d03b3b", None: None}[self.results[i]]
+            if colour:
+                self.steps.itemconfig(i, fg=colour)
+        self.steps.selection_clear(0, tk.END)
+        self.steps.selection_set(self.index)
+        self.steps.see(self.index)
+
+    def _select(self, selection):
+        if selection:
+            self._go(selection[0])
+
+    def _go(self, index):
+        self.index = max(0, min(len(CHECK_STEPS) - 1, index))
+        self.true_since = None
+        step = CHECK_STEPS[self.index]
+        self.title.configure(text=f"{self.index + 1}. {step['title']}")
+        self.do.configure(text=step["do"])
+        action = step.get("action")
+        usb_only = action is not None and action[0] in ("usb", "replay")
+        if action is None:
+            self.action_btn.configure(text="(no action)", state=tk.DISABLED)
+        elif usb_only and not USB_DIRECT:
+            self.action_btn.configure(text=f"{action[2]} (USB only)", state=tk.DISABLED)
+        else:
+            self.action_btn.configure(text=action[2], state=tk.NORMAL)
+        self._refresh_list()
+
+    def _action(self):
+        kind, what, label = CHECK_STEPS[self.index]["action"]
+        app = self.app
+        if not app.link:
+            messagebox.showerror("Not connected", "Connect first.", parent=self.win)
+            return
+        if kind == "cmd":
+            app._send_command(next(c for c in COMMANDS if c["name"] == what))
+        elif kind == "usb":
+            try:
+                app.link.write((what + "\n").encode())
+                app.event(f"check: sent '{what}'")
+            except Exception as e:
+                app.event(f"check: send failed: {e}")
+        elif kind == "replay":
+            app.replay_idx.set(str(what))
+            app.replay_servos.set(True)
+            app._start_replay()
+
+    def _mark(self, result):
+        self.results[self.index] = result
+        step = CHECK_STEPS[self.index]
+        self.app.event(f"check {self.index + 1} {step['title']}: {result}")
+        self._refresh_list()
+        if result == "PASS":
+            self._go(self.index + 1)
+
+    def _tick(self):
+        if not self.win.winfo_exists():
+            return
+        step = CHECK_STEPS[self.index]
+        row = self.app.latest or {}
+        lines = []
+        for name in step["watch"]:
+            value = row.get(name)
+            text = "-" if value is None else (f"{value:.2f}" if isinstance(value, float) else str(value))
+            if name == "nogo" and isinstance(value, int):
+                text += f"  ({nogo_text(value)})" if value else "  (GO)"
+            lines.append(f"{name:>11}: {text}")
+        self.watch.configure(text="\n".join(lines))
+
+        auto = step.get("auto")
+        if self.results[self.index] is not None:
+            self.state.configure(text=self.results[self.index],
+                                 fg="#0ca30c" if self.results[self.index] == "PASS" else "#d03b3b")
+        elif auto is None:
+            self.state.configure(text="Look, then press Pass or Fail", fg="#555555")
+        elif not row:
+            self.state.configure(text="Waiting for telemetry...", fg="#555555")
+        else:
+            try:
+                ok = bool(auto(row))
+            except Exception:
+                ok = False
+            now = time.monotonic()
+            if ok:
+                self.true_since = self.true_since or now
+                if now - self.true_since >= HOLD_S:
+                    self._mark("PASS")
+                else:
+                    self.state.configure(text="Hold it...", fg="#b45f06")
+            else:
+                self.true_since = None
+                self.state.configure(text="Not yet", fg="#b45f06")
+        self.win.after(200, self._tick)
+
+    def _close(self):
+        done = sum(r == "PASS" for r in self.results)
+        failed = [CHECK_STEPS[i]["title"] for i, r in enumerate(self.results) if r == "FAIL"]
+        self.app.event(f"system check closed: {done}/{len(CHECK_STEPS)} passed"
+                       + (f", FAILED: {', '.join(failed)}" if failed else ""))
+        self.win.destroy()
+
+
 class TelemetryApp:
     MAX_ROWS_BEFORE_HEADER = 500  # rows kept while waiting for the first header
 
@@ -595,6 +841,7 @@ class TelemetryApp:
                            command=lambda c=cmd: self._send_command(c))
             b.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
             self.cmd_buttons.append(b)
+        ttk.Button(left, text="System check...", command=lambda: SystemCheck(self)).pack(fill=tk.X, pady=(4, 0))
 
         if USB_DIRECT:
             self._build_replay_panel(left)
