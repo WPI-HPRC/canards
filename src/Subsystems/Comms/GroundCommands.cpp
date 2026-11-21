@@ -30,12 +30,6 @@ GroundReply GroundCommands::handle(const char* name, StateId state, bool sweepAc
     return push(commands, 1) ? GroundReply::Ok : GroundReply::Rejected;
   }
 
-  if (std::strcmp(name, kRezeroGyro) == 0) {
-    if (state != StateId::PreFlight) return GroundReply::Rejected;
-    const Command commands[] = {make(CommandType::EnterPreFlight)};  // in PreFlight: re-initialise
-    return push(commands, 1) ? GroundReply::Ok : GroundReply::Rejected;
-  }
-
   return GroundReply::Unknown;
 }
 

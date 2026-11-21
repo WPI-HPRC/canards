@@ -208,10 +208,6 @@ bool onArmFlight() {
 bool onActuatorTest() {
   return ground.handle(GroundCommands::kActuatorTest, flight.state(), flight.sweepActive()) == GroundReply::Ok;
 }
-bool onRezeroGyro() {
-  return ground.handle(GroundCommands::kRezeroGyro, flight.state(), flight.sweepActive()) == GroundReply::Ok;
-}
-bool onClearFaults() { return flight.clearSafetyHistory(); }
 
 // --- Telemetry columns ---------------------------------------------------------
 // Keep a row short: this is airtime, not the SD log.
@@ -554,13 +550,8 @@ void handleConsoleLine(char* line) {
   if (name == nullptr) return;  // empty, or a "$" line that failed its checksum
 
   // Replies go out later, after `line` is reused: name them by the constants.
-  if (strcmp(name, GroundCommands::kClearFaults) == 0) {
-    console.reply(GroundCommands::kClearFaults, onClearFaults() ? "OK" : "REJECTED");
-    return;
-  }
   const char* stable = strcmp(name, GroundCommands::kArmFlight) == 0      ? GroundCommands::kArmFlight
                        : strcmp(name, GroundCommands::kActuatorTest) == 0 ? GroundCommands::kActuatorTest
-                       : strcmp(name, GroundCommands::kRezeroGyro) == 0   ? GroundCommands::kRezeroGyro
                                                                           : "?";
   switch (ground.handle(name, flight.state(), flight.sweepActive())) {
     case GroundReply::Ok: console.reply(stable, "OK"); return;
@@ -724,8 +715,6 @@ void setup() {
     // flight-ready.
     telemetry.addCommand(GroundCommands::kArmFlight, onArmFlight);
     telemetry.addCommand(GroundCommands::kActuatorTest, onActuatorTest);
-    telemetry.addCommand(GroundCommands::kRezeroGyro, onRezeroGyro);
-    telemetry.addCommand(GroundCommands::kClearFaults, onClearFaults);
   }
   // The USB console's telemetry rows go out in Flight and in replay (so the
   // ground station can watch a replay over USB). Commands are read in Flight

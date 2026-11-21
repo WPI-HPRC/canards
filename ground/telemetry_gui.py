@@ -159,12 +159,6 @@ COMMANDS = [
      "confirm": "Arm the rocket for flight?\n\nThis cannot be undone without a reboot."},
     {"name": "actuatorTest", "label": "Actuator test",
      "confirm": "Run the actuator test? Keep clear of the canards."},
-    {"name": "rezeroGyro",   "label": "Rezero gyro",
-     "confirm": "Re-zero the gyro and redo the pad alignment?\n\nArmed (PreFlight) only. "
-                "Keep the rocket STILL and on the rail for a few seconds."},
-    {"name": "clearFaults",  "label": "Clear faults",
-     "confirm": "Clear the safety-fault history?\n\nOnly the history: a fault that is happening "
-                "right now still forces the canards to neutral."},
 ]
 
 SIMULATED_PORT = "SIMULATED"
@@ -175,13 +169,6 @@ NOGO_REASONS = [
     (1, "not armed"), (2, "canard actuation routine"), (4, "nav not ready"), (8, "sensor/SD down"),
     (16, "safety fault"), (32, "canards not ready"), (64, "tilted"), (128, "encoder bad"),
 ]
-
-
-# Reasons the operator may override: they do not stop the canards. The others
-# (not armed, routine running, nav not ready, canards not ready) are enforced
-# by the firmware itself (the canard gates), so overriding them would only
-# hide why the canards will not control.
-NOGO_OVERRIDABLE = {8: "sensor/SD down", 16: "safety fault (history)", 64: "tilted", 128: "encoder bad"}
 
 
 def nogo_text(bits: int) -> str:
@@ -843,17 +830,8 @@ class TelemetryApp:
         # GNC GO / NO-GO, big: shown once the rocket sends "gnc_go".
         self.go_label = tk.Label(left, text="GNC: -", font=("Helvetica", 20, "bold"),
                                  fg="white", bg="#777777", pady=6)
-        self.go_label.pack(fill=tk.X, pady=(0, 2))
+        self.go_label.pack(fill=tk.X, pady=(0, 4))
         self.last_go = None
-        # Override: NO-GO reasons that do not stop the canards can be ignored.
-        ov = ttk.LabelFrame(left, text="GO override (ignore these NO-GO reasons)", padding=2)
-        ov.pack(fill=tk.X, pady=(0, 4))
-        self.ignore = {}
-        for bit, name in NOGO_OVERRIDABLE.items():
-            var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(ov, text=name, variable=var,
-                            command=lambda: self._update_go(self.latest, force_event=True)).pack(side=tk.LEFT)
-            self.ignore[bit] = var
 
         cmd_frame = ttk.LabelFrame(left, text="Commands", padding=4)
         cmd_frame.pack(fill=tk.X)
@@ -1240,21 +1218,17 @@ class TelemetryApp:
         self._trim_history()
         self._update_values_table()
 
-    def _update_go(self, row, force_event=False):
-        go, bits = (row or {}).get("gnc_go"), (row or {}).get("nogo")
+    def _update_go(self, row):
+        go, bits = row.get("gnc_go"), row.get("nogo")
         if not isinstance(go, int) or not isinstance(bits, int):
             return
-        ignored = sum(bit for bit, var in self.ignore.items() if var.get())
         if go == 1:
             text, colour = "GNC GO", "#0ca30c"
-        elif bits & ~ignored == 0:
-            text, colour = f"GO (OVERRIDE: {nogo_text(bits)})", "#d08a00"
         else:
-            text, colour = f"NO-GO: {nogo_text(bits & ~ignored)}", "#d03b3b"
+            text, colour = f"NO-GO: {nogo_text(bits)}", "#d03b3b"
         self.go_label.configure(text=text, bg=colour)
-        key = (go, bits, ignored)
-        if key != self.last_go or force_event:
-            self.last_go = key
+        if (go, bits) != self.last_go:
+            self.last_go = (go, bits)
             self.event(text)
 
     def _trim_history(self):

@@ -1,12 +1,9 @@
-// GNC GO / NO-GO (src/Safety/GoNoGo.h), and the pad commands that go with it:
-// rezeroGyro (GroundCommands) and clearFaults (SafetyMonitor::clearSticky).
+// GNC GO / NO-GO (src/Safety/GoNoGo.h).
 #include <unity.h>
 
 #include <cmath>
 
 #include "Safety/GoNoGo.h"
-#include "Safety/SafetyMonitor.h"
-#include "Subsystems/Comms/GroundCommands.h"
 
 namespace {
 
@@ -63,45 +60,10 @@ void test_each_failure_sets_its_own_bit() {
 
 void test_defaults_are_no_go() { TEST_ASSERT_TRUE(GoNoGo::nogo(GoNoGo::Inputs{}) != 0); }
 
-void test_rezero_gyro_only_in_preflight_and_queues_enter_preflight() {
-  const StateId others[] = {StateId::Init, StateId::Boost, StateId::Control, StateId::Coast,
-                            StateId::Chute, StateId::Land};
-  for (StateId s : others) {
-    GroundCommands g;
-    TEST_ASSERT_TRUE(g.handle(GroundCommands::kRezeroGyro, s, false) == GroundReply::Rejected);
-    TEST_ASSERT_EQUAL_UINT(0, g.pending());
-  }
-  GroundCommands g;
-  TEST_ASSERT_TRUE(g.handle(GroundCommands::kRezeroGyro, StateId::PreFlight, false) == GroundReply::Ok);
-  Command c;
-  TEST_ASSERT_TRUE(g.poll(c));
-  TEST_ASSERT_TRUE(c.type == CommandType::EnterPreFlight);
-  TEST_ASSERT_FALSE(g.poll(c));
-}
-
-void test_clear_sticky_keeps_active_faults() {
-  SafetyMonitor m;
-  SensorFrame bad;
-  bad.timeUs = 1000;
-  bad.imuOk = false;  // a failed read: active and sticky
-  m.check(bad, makeTimeStep(false, 0, bad.timeUs), 0);
-  TEST_ASSERT_TRUE(m.sticky() != 0);
-  m.clearSticky();
-  TEST_ASSERT_EQUAL_UINT16(m.active(), m.sticky());  // still active: kept
-  SensorFrame good = bad;
-  good.timeUs = 2000;
-  good.imuOk = true;
-  m.check(good, makeTimeStep(true, bad.timeUs, good.timeUs), 0);
-  m.clearSticky();
-  TEST_ASSERT_EQUAL_UINT16(0, m.sticky());
-}
-
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_all_good_is_go);
   RUN_TEST(test_each_failure_sets_its_own_bit);
   RUN_TEST(test_defaults_are_no_go);
-  RUN_TEST(test_rezero_gyro_only_in_preflight_and_queues_enter_preflight);
-  RUN_TEST(test_clear_sticky_keeps_active_faults);
   return UNITY_END();
 }
