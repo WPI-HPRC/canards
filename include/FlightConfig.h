@@ -79,6 +79,11 @@ constexpr uint64_t kCutoffHoldUs = 20 * kUsPerMs;           // PLACEHOLDER (user
 constexpr uint64_t kBaroStaleUs = 100 * kUsPerMs;           // PLACEHOLDER (user / estimator owner)
 
 // --- System safety ----------------------------------------------------------
+// The hardware watchdog resets the board if loop() stops for this long. It
+// starts when the rocket first leaves Init (after arming), because on the pad
+// an SD log download over USB blocks loop() for seconds.
+constexpr uint32_t kWatchdogTimeoutUs = 1000 * 1000;        // PLACEHOLDER (user)
+
 // A gap between IMU samples longer than this raises a safety fault.
 constexpr uint64_t kMaxImuGapUs = 25 * kUsPerMs;            // PLACEHOLDER (user): depends on the undecided IMU rate
 
