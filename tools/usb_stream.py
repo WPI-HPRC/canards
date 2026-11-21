@@ -223,7 +223,7 @@ def looks_like_row(line):
 def cmd_stream(args):
     if not args.synthetic and not args.log:
         raise SystemExit("give a LOG.csv or --synthetic")
-    lines = (synthetic_lines(rate_hz=args.rate, roll_rate_dps=args.roll_rate) if args.synthetic
+    lines = (synthetic_lines(rate_hz=args.rate, pad_s=args.pad, roll_rate_dps=args.roll_rate) if args.synthetic
              else log_lines(args.log))
     out_path = args.output or ("stream_synthetic_replies.csv" if args.synthetic else
                                os.path.splitext(os.path.basename(args.log))[0] + "_stream.csv")
@@ -301,7 +301,14 @@ def cmd_replay(args):
             if line is None:
                 continue
             print(line)
-            if line.startswith("# replay done") or "failed" in line:
+            if "failed" in line:
+                break
+            if args.detach and line.startswith("mode: replay"):
+                print("Replay running. Port released: connect the ground station now "
+                      "(python3 ground/telemetry_gui.py --usb --flight), or unplug USB and watch on the radio.",
+                      file=sys.stderr)
+                break
+            if line.startswith("# replay done"):
                 break
     except KeyboardInterrupt:
         pass
@@ -322,6 +329,8 @@ def main(argv=None):
     s.add_argument("--synthetic", action="store_true", help="a generated flight instead of a log")
     s.add_argument("--rate", type=float, default=200.0, help="synthetic sample rate, Hz (default 200)")
     s.add_argument("--servos", action="store_true", help="let the servos move")
+    s.add_argument("--pad", type=float, default=5.0, metavar="S",
+                   help="synthetic: seconds on the pad before launch (default 5; arming is at 1 s)")
     s.add_argument("--roll-rate", type=float, default=0.0, metavar="DPS",
                    help="synthetic: constant roll rate during burn and coast, deg/s "
                         "(+ = clockwise seen from the tail); for the control-sign check")
@@ -332,16 +341,20 @@ def main(argv=None):
     r.add_argument("index", type=int)
     r.add_argument("--servos", action="store_true", help="let the servos move")
     r.add_argument("--fast", action="store_true", help="as fast as the SD log keeps up")
+    r.add_argument("--detach", action="store_true",
+                   help="let go of the port once the replay starts, for the ground station")
 
     g = sub.add_parser("synthetic", help="print the synthetic flight's rows (no board needed)")
     g.add_argument("--rate", type=float, default=200.0)
+    g.add_argument("--pad", type=float, default=5.0, metavar="S",
+                   help="synthetic: seconds on the pad before launch (default 5; arming is at 1 s)")
     g.add_argument("--roll-rate", type=float, default=0.0, metavar="DPS",
                    help="synthetic: constant roll rate during burn and coast, deg/s "
                         "(+ = clockwise seen from the tail); for the control-sign check")
 
     args = p.parse_args(argv)
     if args.cmd == "synthetic":
-        for line in synthetic_lines(rate_hz=args.rate, roll_rate_dps=args.roll_rate):
+        for line in synthetic_lines(rate_hz=args.rate, pad_s=args.pad, roll_rate_dps=args.roll_rate):
             print(line)
         return 0
     if args.cmd == "stream":

@@ -96,6 +96,8 @@ that reboots the board into its DFU bootloader.
 python3 tools/usb_stream.py replay 7              # paced by the recorded sample times
 python3 tools/usb_stream.py replay 7 --fast       # as fast as the SD log keeps up
 python3 tools/usb_stream.py replay 7 --servos     # and let the servos move (OPEN LOOP)
+python3 tools/usb_stream.py replay 7 --servos --detach   # let go of the port once it starts, so
+                                                         # ground/telemetry_gui.py --usb --flight can watch
 ```
 
 (Or type `mode replay 7` into a serial terminal within 1.5 s of the board's

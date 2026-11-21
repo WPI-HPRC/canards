@@ -366,6 +366,7 @@ void loopFlight() {
 
 void loopReplay() {
   if (!runCycle()) sdLog.drain(1);
+  console.update(millis(), SerialUSB.dtr());  // telemetry rows only; no commands in replay
 
   static bool reported = false;
   if (!reported && replay.endOfLog() && sdLog.pending() == 0) {
@@ -447,8 +448,11 @@ void setup() {
     // flight-ready.
     telemetry.addCommand(GroundCommands::kArmFlight, onArmFlight);
     telemetry.addCommand(GroundCommands::kActuatorTest, onActuatorTest);
-    console.begin(tlmColumns);
   }
+  // The USB console's telemetry rows go out in Flight and in replay (so the
+  // ground station can watch a replay over USB). Commands are read in Flight
+  // only. Stream mode owns the USB port, so no console there.
+  if (boot.mode != BootMode::Stream) console.begin(tlmColumns);
   telemetry.begin(radioLink(), tlmColumns, radioOk);
 
   switch (boot.mode) {
