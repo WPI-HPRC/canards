@@ -17,6 +17,13 @@
 // Anything else, or nothing, is Flight. With no host connected, Flight never
 // waits. The options may come in any order.
 //
+// USB bench console (Flight mode, Platform/UsbConsole.h): while a host has the
+// port open, the telemetry rows also go out over USB, and the ground-station
+// commands (armFlight, actuatorTest) and Nic's log download (list, dump) are
+// taken over USB, one per line. Same rules as over the radio. View it with
+// `python3 ground/telemetry_gui.py --usb`. Nothing is written with USB
+// unplugged, and nothing on it ever blocks the loop.
+//
 // Rules (section 7):
 //   - Flight never accepts injected data.
 //   - Replay and stream are never flight-ready: no watchdog, no log download
@@ -55,6 +62,7 @@
 #include "Platform/ReplayPacing.h"
 #include "Platform/SdLineReader.h"
 #include "Platform/SdLogSink.h"
+#include "Platform/UsbConsole.h"
 #include "Platform/UsbLineReader.h"
 #include "Subsystems/Comms/GroundCommands.h"
 #include "Subsystems/Logger/CycleLogFormat.h"
@@ -128,15 +136,33 @@ SelectedActuators selectedActuators;
 FlightComputer flight(FlightIo{selectedSensors, selectedCommands, selectedActuators, estimator, controller, sdLog},
                       VehicleConfig::kServoConfig);
 
-// --- Loop timing, for telemetry: the peaks since the last telemetry row -------
-uint32_t peakCycleUs = 0;  // longest FlightComputer::cycle()
-uint32_t peakGapUs = 0;    // longest time between IMU samples
+// --- Loop timing, for telemetry --------------------------------------------------
+// The peak over each kPeakWindowMs window. Reported values change only when a
+// window closes, so the radio and the USB console (two readers, at their own
+// moments) show the same numbers and neither resets the other's.
+constexpr uint32_t kPeakWindowMs = 1000;
+
+struct Peak {
+  uint32_t current = 0;   // the window still open
+  uint32_t reported = 0;  // the last window that closed
+  void add(uint32_t v) {
+    if (v > current) current = v;
+  }
+  void closeWindow() {
+    reported = current;
+    current = 0;
+  }
+};
+Peak peakCycleUs;  // longest FlightComputer::cycle()
+Peak peakGapUs;    // longest time between IMU samples
+uint32_t peakWindowStartMs = 0;
 bool watchdogRunning = false;
 
-uint32_t takePeak(uint32_t& peak) {
-  const uint32_t v = peak;
-  peak = 0;
-  return v;
+void closePeakWindow(uint32_t nowMs) {
+  if (nowMs - peakWindowStartMs < kPeakWindowMs) return;
+  peakWindowStartMs = nowMs;
+  peakCycleUs.closeWindow();
+  peakGapUs.closeWindow();
 }
 
 // --- Ground-station commands (ground/telemetry_gui.py), Flight mode only -------
@@ -168,8 +194,8 @@ const TelemetryColumn tlmColumns[] = {
     TLM_FLOAT("sf_g", flight.navigation().specificForce() / FlightConfig::kGravity, 2),
     TLM_UINT("safety", flight.safety().sticky()),
     TLM_UINT("gates", flight.canards().status().gates),
-    TLM_UINT("cyc_max_us", takePeak(peakCycleUs)),
-    TLM_UINT("gap_max_us", takePeak(peakGapUs)),
+    TLM_UINT("cyc_max_us", peakCycleUs.reported),
+    TLM_UINT("gap_max_us", peakGapUs.reported),
     TLM_UINT("imu_missed", sensors.missedSamples()),
     TLM_UINT("log_rows", sdLog.rowsWritten()),
     TLM_UINT("log_drop", sdLog.dropped()),
@@ -270,11 +296,47 @@ void startStream() {
 bool runCycle() {
   const uint32_t start = micros();
   if (!flight.cycle()) return false;
-  const uint32_t took = micros() - start;
-  if (took > peakCycleUs) peakCycleUs = took;
+  peakCycleUs.add(micros() - start);
   const uint64_t gap = flight.lastRecord().step.gapUs;
-  if (gap > peakGapUs) peakGapUs = gap > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(gap);
+  peakGapUs.add(gap > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(gap));
   return true;
+}
+
+// --- USB bench console (Flight mode) -----------------------------------------------
+// One command per line over USB: the ground-station commands, bare
+// ("armFlight") or in the radio form ("$C,armFlight*29"), with the same rules
+// as over the radio; or Nic's log download ("list", "dump", "dump <N>").
+UsbConsole console(SerialUSB);
+
+void handleConsoleLine(char* line) {
+  const char* name = GroundCommands::commandFromLine(line);
+  if (name == nullptr) return;  // empty, or a "$" line that failed its checksum
+
+  // Replies go out later, after `line` is reused: name them by the constants.
+  const char* stable = strcmp(name, GroundCommands::kArmFlight) == 0      ? GroundCommands::kArmFlight
+                       : strcmp(name, GroundCommands::kActuatorTest) == 0 ? GroundCommands::kActuatorTest
+                                                                          : "?";
+  switch (ground.handle(name, flight.state(), flight.sweepActive())) {
+    case GroundReply::Ok: console.reply(stable, "OK"); return;
+    case GroundReply::Rejected: console.reply(stable, "REJECTED"); return;
+    case GroundReply::Unknown: break;
+  }
+
+  const bool logCommand = strcmp(name, "list") == 0 || strncmp(name, "dump", 4) == 0;
+  if (!logCommand) {
+    console.reply("?", "UNKNOWN");  // `name` lives in the line buffer, which is reused
+    return;
+  }
+  // Log download: on the pad only, it blocks loop() for seconds. Not after
+  // arming or a scrub (StandDown back to Init): the STM32 watchdog cannot be
+  // stopped once started, so a download would reset the board. Power-cycle to
+  // download then. scripts/dump_log.py shows the ERROR line.
+  if (flight.state() != StateId::Init || watchdogRunning) {
+    SerialUSB.println("\n---ERROR log download only in Init before arming; power-cycle first---");
+    return;
+  }
+  console.discardOutput();
+  logDumpCommand(const_cast<char*>(name));
 }
 
 void loopFlight() {
@@ -282,13 +344,11 @@ void loopFlight() {
   // most the next sample, which waits in the IMU's output register.
   if (!runCycle()) sdLog.drain(1);
 
-  if (flight.state() == StateId::Init) {
-    // Log download over USB, on the pad only: it blocks loop() for seconds.
-    // Not after a scrub (StandDown back to Init): the STM32 watchdog cannot be
-    // stopped once started, so a download would reset the board. Power-cycle
-    // to download after a scrub.
-    if (!watchdogRunning) logDumpPoll();
-  } else if (!watchdogRunning) {
+  static char consoleLine[64];
+  if (usbLines.readLine(consoleLine, sizeof consoleLine)) handleConsoleLine(consoleLine);
+  console.update(millis(), SerialUSB.dtr());
+
+  if (flight.state() != StateId::Init && !watchdogRunning) {
     IWatchdog.begin(FlightConfig::kWatchdogTimeoutUs);
     watchdogRunning = true;
   }
@@ -378,6 +438,7 @@ void setup() {
     // flight-ready.
     telemetry.addCommand(GroundCommands::kArmFlight, onArmFlight);
     telemetry.addCommand(GroundCommands::kActuatorTest, onActuatorTest);
+    console.begin(tlmColumns);
   }
   telemetry.begin(radioLink(), tlmColumns, radioOk);
 
@@ -402,6 +463,7 @@ void setup() {
 }
 
 void loop() {
+  closePeakWindow(millis());
   switch (boot.mode) {
     case BootMode::Flight: loopFlight(); break;
     case BootMode::Replay: loopReplay(); break;

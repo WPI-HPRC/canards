@@ -23,6 +23,31 @@ mode, commands, pulses, safety bits) follow. Readers find columns by name.
 `testdata/sample_log.csv` is a short scripted flight recorded by the desktop
 tests (`SAMPLE_LOG_OUT=$PWD/tools/testdata/sample_log.csv pio test -e native -f test_log_replay`).
 
+## Bench without the ground radio (USB bench console)
+
+In Flight mode (env `marsv21`), while a host has the board's USB port open,
+the board also sends its telemetry rows over USB (the radio's `$H` / `$D` /
+`$A` lines, without the radio framing) and takes commands over USB, one per
+line:
+
+```
+armFlight          same as the GUI button: PreFlight + enable (starts the watchdog)
+actuatorTest       the canard sweep, Init only
+list | dump [N]    Nic's log download, Init only and only before arming
+```
+
+The commands follow the same rules as over the radio. To use the ground GUI on
+USB:
+
+```bash
+python3 ground/telemetry_gui.py --usb --flight    # pick the board's port, Connect
+```
+
+With USB unplugged, as in flight, the console writes nothing. It never blocks
+the loop: a row that can't go out yet is skipped. Open the port at 115200,
+**never 1200** (that reboots into DFU). A host that has the port open during
+boot makes the board wait 1.5 s for a mode line before it starts Flight.
+
 ## Record and download
 
 Every boot of the flight program writes `/logs/canardsLog<N>.csv` on the SD

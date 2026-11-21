@@ -19,3 +19,8 @@
 // Reads any pending command characters and runs a complete command. Call
 // every loop().
 void logDumpPoll();
+
+// Runs one command line ("list", "dump", "dump <N>") that the caller has
+// already read, for a caller that shares SerialUSB with other commands (the
+// flight program's USB bench console, src/Platform/UsbConsole.h).
+void logDumpCommand(char *line);

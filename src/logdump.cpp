@@ -111,6 +111,10 @@ static void runCommand(char *cmd) {
   }
 }
 
+void logDumpCommand(char *line) {
+  runCommand(line);
+}
+
 void logDumpPoll() {
   static char line[32];
   static size_t len = 0;

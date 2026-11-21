@@ -6,6 +6,8 @@ QUICK START
     pip install -r ground/requirements.txt
     python3 ground/telemetry_gui.py              # pick a serial port, Connect
     python3 ground/telemetry_gui.py --list       # just list serial ports
+    python3 ground/telemetry_gui.py --usb --flight   # bench: the board's USB port, no radio,
+                                                     # plots for the flight program (env marsv21)
 
     Choose "SIMULATED" in the port list to try the GUI without hardware: it
     produces fake flight data in exactly the format the rocket sends.
@@ -82,6 +84,11 @@ GROUND_CALLSIGN = b"KV0R"     # callsign we transmit commands with (yours!)
 RADIO_FRAMING = True
 MAX_MESSAGE_SIZE = 232        # largest payload per chunk (LoRaE22.h)
 
+# --usb: talk to the board's own USB port instead of a ground radio (the flight
+# program's USB bench console, src/Platform/UsbConsole.h). The same lines, with
+# no radio framing in either direction. Set from the command line.
+USB_DIRECT = False
+
 LOG_DIR = Path(__file__).resolve().parent / "ground_logs"
 
 HISTORY_SECONDS = 60          # how much data the plots keep / show
@@ -121,6 +128,15 @@ PLOTS = [
     {"title": "Vertical velocity", "ylabel": "m/s", "series": ["gps_vel_up_mps"]},
     {"title": "Acceleration",      "ylabel": "g",   "series": ["accel_g", "az_g"]},
     {"title": "Angular rate",      "ylabel": "deg/s", "series": ["gx_dps", "gy_dps", "gz_dps"]},
+]
+
+# The flight program (src/main.cpp, env marsv21) sends its own columns, not the
+# bring-up sketch's: `--flight` plots these instead of PLOTS.
+FLIGHT_PLOTS = [
+    {"title": "Altitude (estimate)", "ylabel": "m",   "series": ["alt_m"]},
+    {"title": "Speed (estimate)",    "ylabel": "m/s", "series": ["speed"]},
+    {"title": "Tilt",                "ylabel": "deg", "series": ["tilt_deg"]},
+    {"title": "Specific force",      "ylabel": "g",   "series": ["sf_g"]},
 ]
 
 # Line colors, used in order within each plot (a fixed order, so the first
@@ -210,7 +226,7 @@ class Deframer:
         self.buf = bytearray()
 
     def feed(self, data: bytes) -> bytes:
-        if not RADIO_FRAMING:
+        if not RADIO_FRAMING or USB_DIRECT:
             return data
         self.buf += data
         out = bytearray()
@@ -596,7 +612,8 @@ class TelemetryApp:
         if "confirm" in cmd and not messagebox.askyesno("Confirm", cmd["confirm"]):
             return
         try:
-            self.link.write(frame(make_line("C", [cmd["name"]])))
+            line = make_line("C", [cmd["name"]])
+            self.link.write(line if USB_DIRECT else frame(line))
             self.event(f"sent {cmd['name']}")
         except Exception as e:
             self.event(f"send {cmd['name']} failed: {e}")
@@ -748,7 +765,15 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--list", action="store_true", help="list serial ports and exit")
     parser.add_argument("--port", help="port to select at start (or SIMULATED)")
+    parser.add_argument("--usb", action="store_true",
+                        help="the port is the board's own USB (bench console), not a ground radio")
+    parser.add_argument("--flight", action="store_true",
+                        help="plot the flight program's columns (FLIGHT_PLOTS), not the bring-up sketch's")
     args = parser.parse_args()
+    global USB_DIRECT, PLOTS
+    USB_DIRECT = args.usb
+    if args.flight:
+        PLOTS = FLIGHT_PLOTS
     if args.list:
         for p in list_ports():
             print(p)

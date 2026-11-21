@@ -412,6 +412,52 @@ void test_actuator_test_then_arm_flight_through_the_flight_computer() {
   TEST_ASSERT_EQUAL_UINT32(0, rig.canards().rejectedCommandCount);
 }
 
+// --- 4. commandFromLine: the USB bench console's line format ----------------
+
+void expectCommand(const char* expected, const char* input) {
+  char buf[64];
+  std::strncpy(buf, input, sizeof buf - 1);
+  buf[sizeof buf - 1] = '\0';
+  const char* got = GroundCommands::commandFromLine(buf);
+  if (expected == nullptr) {
+    TEST_ASSERT_NULL_MESSAGE(got, input);
+  } else {
+    TEST_ASSERT_NOT_NULL_MESSAGE(got, input);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, got, input);
+  }
+}
+
+void test_command_from_line_accepts_bare_names() {
+  expectCommand("armFlight", "armFlight");
+  expectCommand("actuatorTest", "  actuatorTest \r");
+  expectCommand("dump 7", "dump 7");  // passed on whole: main.cpp routes it to the log download
+}
+
+void test_command_from_line_accepts_the_radio_form_with_a_good_checksum() {
+  // The same lines ground/telemetry_gui.py builds (make_line("C", [name])).
+  expectCommand("armFlight", "$C,armFlight*29");
+  expectCommand("actuatorTest", "$C,actuatorTest*52");
+  expectCommand("armFlight", "$C,armFlight*29\r");
+}
+
+void test_command_from_line_rejects_bad_radio_lines() {
+  expectCommand(nullptr, "");
+  expectCommand(nullptr, "   ");
+  expectCommand(nullptr, "$C,armFlight*28");   // wrong checksum
+  expectCommand(nullptr, "$C,armFlight");      // no checksum
+  expectCommand(nullptr, "$C,armFlight*2");    // short checksum
+  expectCommand(nullptr, "$C,armFlight*ZZ");   // not hex
+  expectCommand(nullptr, "$D,1,2*47");         // a good line, but not a command
+}
+
+void test_command_from_line_names_still_go_through_handle() {
+  char line[] = "$C,armFlight*29";
+  GroundCommands ground;
+  EXPECT_REPLY(GroundReply::Ok, ground.handle(GroundCommands::commandFromLine(line), StateId::Init, false));
+  char unknown[] = "launchNow";
+  EXPECT_REPLY(GroundReply::Unknown, ground.handle(GroundCommands::commandFromLine(unknown), StateId::Init, false));
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -426,5 +472,9 @@ int main(int, char**) {
   RUN_TEST(test_a_full_queue_rejects_and_queues_nothing_of_that_command);
   RUN_TEST(test_the_queue_keeps_its_order_across_the_wrap_around);
   RUN_TEST(test_actuator_test_then_arm_flight_through_the_flight_computer);
+  RUN_TEST(test_command_from_line_accepts_bare_names);
+  RUN_TEST(test_command_from_line_accepts_the_radio_form_with_a_good_checksum);
+  RUN_TEST(test_command_from_line_rejects_bad_radio_lines);
+  RUN_TEST(test_command_from_line_names_still_go_through_handle);
   return UNITY_END();
 }

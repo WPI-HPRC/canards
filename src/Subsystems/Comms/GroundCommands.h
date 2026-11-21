@@ -51,6 +51,13 @@ class GroundCommands final : public CommandSource {
   // queued then).
   GroundReply handle(const char* name, StateId state, bool sweepActive);
 
+  // The command name in one line typed on the USB bench console
+  // (Platform/UsbConsole.h), in place: either the radio form "$C,<name>*XX"
+  // (checksum checked, as in telemetry.cpp) or the bare name. Leading and
+  // trailing spaces are dropped. Returns nullptr for an empty line, a "$" line
+  // with a bad or missing checksum, or a "$" line that is not a command.
+  static const char* commandFromLine(char* line);
+
   bool poll(Command& out) override;
 
   size_t pending() const { return count_; }
