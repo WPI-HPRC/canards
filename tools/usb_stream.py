@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Stream sensor rows into the flight program on the board over USB, or start
-an SD replay on it. The board side is src/main.cpp (boot modes) and
+"""Stream sensor rows into the flight program on the board over USB. The board side is src/main.cpp (boot modes) and
 src/Subsystems/Logger/StreamProtocol.h (the protocol).
 
   python3 tools/usb_stream.py stream LOG.csv [--servos] [-o REPLIES.csv]
   python3 tools/usb_stream.py stream --synthetic [--servos] [-o REPLIES.csv]
-  python3 tools/usb_stream.py replay N [--servos] [--fast]
+
+SD replays are started from the ground station only
+(python3 ground/telemetry_gui.py --usb --flight, "SD replay" panel).
 
 HOW THE BOARD IS PUT IN A MODE: at the end of its setup(), if a USB host has
 the port open, the board waits up to 1.5 s for one line, "mode stream
@@ -290,34 +291,6 @@ def cmd_stream(args):
     return 0 if (errors == 0 and timeouts == 0) else 1
 
 
-def cmd_replay(args):
-    mode = "mode replay %d" % args.index + (" servos" if args.servos else "") + (" fast" if args.fast else "")
-    ser = connect(args.port, mode, args.no_reset)
-    buf = bytearray()
-    print("board output (Ctrl-C to stop):", file=sys.stderr)
-    try:
-        while True:
-            line = read_line(ser, 1.0, buf)
-            if line is None:
-                continue
-            print(line)
-            if "failed" in line:
-                break
-            if args.detach and line.startswith("mode: replay"):
-                print("Replay running. Port released: connect the ground station now "
-                      "(python3 ground/telemetry_gui.py --usb --flight), or unplug USB and watch on the radio.",
-                      file=sys.stderr)
-                break
-            if line.startswith("# replay done"):
-                break
-    except KeyboardInterrupt:
-        pass
-    ser.close()
-    print("The replay's own log is the board's log file for that boot. Reboot normally and download it "
-          "(pio run -e marsv21 -t dumplog), then: python3 tools/flight_log.py compare ORIGINAL.csv REPLAY.csv")
-    return 0
-
-
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", help="the board's serial port (default: find USB %04x:%04x)" % (STM_VID, STM_CDC_PID))
@@ -337,13 +310,6 @@ def main(argv=None):
     s.add_argument("--timeout", type=float, default=2.0, help="seconds to wait for each reply")
     s.add_argument("-o", "--output", help="where to save the replies (a CSV log)")
 
-    r = sub.add_parser("replay", help="start an SD replay of /logs/canardsLog<N>.csv")
-    r.add_argument("index", type=int)
-    r.add_argument("--servos", action="store_true", help="let the servos move")
-    r.add_argument("--fast", action="store_true", help="as fast as the SD log keeps up")
-    r.add_argument("--detach", action="store_true",
-                   help="let go of the port once the replay starts, for the ground station")
-
     g = sub.add_parser("synthetic", help="print the synthetic flight's rows (no board needed)")
     g.add_argument("--rate", type=float, default=200.0)
     g.add_argument("--pad", type=float, default=5.0, metavar="S",
@@ -357,9 +323,7 @@ def main(argv=None):
         for line in synthetic_lines(rate_hz=args.rate, pad_s=args.pad, roll_rate_dps=args.roll_rate):
             print(line)
         return 0
-    if args.cmd == "stream":
-        return cmd_stream(args)
-    return cmd_replay(args)
+    return cmd_stream(args)
 
 
 if __name__ == "__main__":

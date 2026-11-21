@@ -26,6 +26,12 @@ WHAT IT DOES
     * Shows the latest value of every column (and of the DERIVED values).
     * Plots the series listed in PLOTS.
     * One button per entry in COMMANDS.
+    * With --usb: the SD replay panel, the ONLY way to run an SD replay
+      (src/main.cpp, "mode replay"). It copies a flight CSV onto the SD card
+      while the card is in this computer, lists the logs on the board's card,
+      and starts a replay: it waits for the board to power up, sends
+      "mode replay <N> [servos]" in the board's 1.5 s boot window, then shows
+      the replay's telemetry like any other session.
 
 HOW TO CHANGE IT  (everything is in the CONFIGURATION section below)
     * Plot something else:  edit PLOTS. A series is any column name the rocket
@@ -50,7 +56,9 @@ PROTOCOL  (mirrors src/telemetry.h)
 
 import argparse
 import math
+import os
 import queue
+import shutil
 import threading
 import time
 from collections import deque
@@ -58,7 +66,7 @@ from datetime import datetime
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -154,6 +162,13 @@ COMMANDS = [
 ]
 
 SIMULATED_PORT = "SIMULATED"
+
+# SD replay (--usb only). The board picks its mode once, at boot: with a USB
+# host connected it waits REPLAY_BOOT_WINDOW_S for one "mode ..." line.
+BOARD_VID, BOARD_PID = 0x0483, 0x5740     # the board's USB CDC port (STM32)
+REPLAY_WAIT_S = 120           # how long to wait for the board to power up
+SD_LOG_FOLDER = "logs"        # LOG_FOLDER_NAME in the firmware
+SD_MAX_LOG_IDX = 100          # MAX_LOG_FILE_IDX in src/sdcard.cpp (wraps after it)
 
 
 # =============================================================================
@@ -276,6 +291,8 @@ class LineSplitter:
             start = line.rfind("$")          # the last '$' starts the real line
             if start >= 0:
                 yield line[start:].rstrip("\r")
+            elif USB_DIRECT and line.strip():
+                yield line.rstrip("\r")      # board text (banners, log list): no radio noise on USB
 
 
 # =============================================================================
@@ -283,8 +300,9 @@ class LineSplitter:
 # =============================================================================
 
 class SerialLink:
-    def __init__(self, port: str, baud: int = SERIAL_BAUD):
-        self.ser = serial.Serial(port, baud, timeout=0.1)
+    def __init__(self, port: str, baud: int = SERIAL_BAUD, ser=None):
+        # `ser`: a port that is already open (the SD replay opens it itself).
+        self.ser = ser if ser is not None else serial.Serial(port, baud, timeout=0.1)
 
     def read(self) -> bytes:
         return self.ser.read(self.ser.in_waiting or 1)
@@ -389,6 +407,71 @@ def list_ports():
 
 
 # =============================================================================
+# SD REPLAY: getting a flight onto the card, and starting the board in replay
+# =============================================================================
+
+def find_board_port():
+    for p in serial.tools.list_ports.comports():
+        if p.vid == BOARD_VID and p.pid == BOARD_PID:
+            return p.device
+    return None
+
+
+def find_sd_cards():
+    """Mounted volumes that look like the board's SD card (a logs/ folder)."""
+    volumes = Path("/Volumes")
+    if not volumes.is_dir():
+        return []
+    return [v for v in sorted(volumes.iterdir()) if (v / SD_LOG_FOLDER).is_dir()]
+
+
+def free_log_index(card: Path):
+    """The highest log number with no file on the card, or None. High numbers
+    are the last the board's own logs reach before they wrap."""
+    used = {p.stem for p in (card / SD_LOG_FOLDER).iterdir()}
+    for idx in range(SD_MAX_LOG_IDX - 1, -1, -1):
+        if f"canardsLog{idx}" not in used:
+            return idx
+    return None
+
+
+def wait_for_boot_and_send(mode_line: str, status, stop):
+    """Background thread. Waits for the board's USB port to appear (if it is
+    there already, for it to go away first: a reset or power-cycle), opens it
+    at once and sends `mode_line` inside the board's boot window. Returns the
+    open port. `status(text)` reports progress; `stop()` cancels."""
+    def wait(cond, what):
+        end = time.monotonic() + REPLAY_WAIT_S
+        while time.monotonic() < end:
+            if stop():
+                raise RuntimeError("cancelled")
+            v = cond()
+            if v:
+                return v
+            time.sleep(0.02)
+        raise RuntimeError(f"timed out waiting for {what}")
+
+    if find_board_port():
+        status("Power-cycle the board now: unplug DC and USB, then plug in USB "
+               "(cold start: the SD card does not come back after a reset)")
+        wait(lambda: not find_board_port(), "the board to power off")
+    status("Waiting for the board to power up (plug in USB)...")
+    port = wait(find_board_port, "the board's USB port")
+    end = time.monotonic() + 2.0
+    while True:
+        try:
+            ser = serial.Serial(port, SERIAL_BAUD, timeout=0.1)   # DTR set: the board waits
+            break
+        except (OSError, serial.SerialException):
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.02)
+    ser.write((mode_line + "\n").encode())
+    ser.flush()
+    return ser
+
+
+# =============================================================================
 # LOGGING: everything received goes to disk
 # =============================================================================
 
@@ -459,6 +542,12 @@ class TelemetryApp:
         self.last_rx = None
         self.warned_missing = set()
 
+        # SD replay state (--usb only)
+        self.replay_queue = queue.Queue()  # ("status"|"ready"|"failed", payload) from its thread
+        self.replay_thread = None
+        self.replay_cancel = False
+        self.in_listing = False         # between ---LIST BEGIN--- and ---LIST END---
+
         self._build_ui()
         self.root.after(50, self._poll)
         self.root.after(PLOT_REFRESH_MS, self._redraw_plots)
@@ -494,6 +583,9 @@ class TelemetryApp:
                            command=lambda c=cmd: self._send_command(c))
             b.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
             self.cmd_buttons.append(b)
+
+        if USB_DIRECT:
+            self._build_replay_panel(left)
 
         link_frame = ttk.LabelFrame(left, text="Link", padding=4)
         link_frame.pack(fill=tk.X, pady=4)
@@ -545,6 +637,141 @@ class TelemetryApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+    def _build_replay_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text="SD replay", padding=4)
+        frame.pack(fill=tk.X, pady=4)
+        row1 = ttk.Frame(frame)
+        row1.pack(fill=tk.X)
+        ttk.Button(row1, text="Copy flight to SD card...",
+                   command=self._copy_flight_to_card).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        self.list_btn = ttk.Button(row1, text="List SD logs", state=tk.DISABLED,
+                                   command=self._list_logs)
+        self.list_btn.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        row2 = ttk.Frame(frame)
+        row2.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(row2, text="Log #").pack(side=tk.LEFT)
+        self.replay_idx = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.replay_idx, width=5).pack(side=tk.LEFT, padx=4)
+        self.replay_servos = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Move servos", variable=self.replay_servos).pack(side=tk.LEFT)
+        self.replay_btn = ttk.Button(row2, text="Start replay", command=self._start_replay)
+        self.replay_btn.pack(side=tk.LEFT, padx=4, expand=True, fill=tk.X)
+        self.replay_status = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.replay_status, wraplength=380,
+                  foreground="#b45f06").pack(fill=tk.X, pady=(4, 0))
+
+    def _copy_flight_to_card(self):
+        cards = find_sd_cards()
+        if not cards:
+            messagebox.showerror("No SD card", "Put the board's SD card in this computer first "
+                                 f"(a volume with a {SD_LOG_FOLDER}/ folder).")
+            return
+        card = cards[0]
+        src = filedialog.askopenfilename(title="Flight CSV to replay",
+                                         filetypes=[("Flight logs", "*.csv"), ("All files", "*")])
+        if not src:
+            return
+        idx = free_log_index(card)
+        if idx is None:
+            messagebox.showerror("SD card full", f"Every log number on {card} is in use.")
+            return
+        dest = card / SD_LOG_FOLDER / f"canardsLog{idx}.csv"
+        if dest.exists():               # free_log_index said no; never overwrite
+            messagebox.showerror("Not copied", f"{dest} already exists.")
+            return
+        try:
+            shutil.copyfile(src, dest)
+            if Path(src).read_bytes() != dest.read_bytes():
+                raise OSError("the copy on the card does not match the original")
+            os.sync()
+        except OSError as e:
+            messagebox.showerror("Copy failed", str(e))
+            return
+        self.replay_idx.set(str(idx))
+        self.event(f"copied {Path(src).name} to {dest}")
+        messagebox.showinfo("Copied", f"Copied to {dest} (log #{idx}).\n\n"
+                            "Eject the card, put it back in the board, then press Start replay.\n\n"
+                            "The board's own logs overwrite this number once they count up to it.")
+
+    def _list_logs(self):
+        if not self.link:
+            return
+        try:
+            self.link.write(b"list\n")
+            self.event("asked the board for its SD logs")
+        except Exception as e:
+            self.event(f"list failed: {e}")
+
+    def _start_replay(self):
+        if self.replay_thread and self.replay_thread.is_alive():
+            self.replay_cancel = True   # the button reads "Cancel" while waiting
+            return
+        try:
+            idx = int(self.replay_idx.get())
+            if not 0 <= idx <= SD_MAX_LOG_IDX:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Log number", f"Type the log number to replay (0-{SD_MAX_LOG_IDX}).")
+            return
+        servos = self.replay_servos.get()
+        if servos and not messagebox.askyesno(
+                "Move servos", "The canards will move during the replay.\n\nKeep clear of the canards."):
+            return
+        if self.link:
+            self._disconnect()          # the replay needs the port from the board's first moment
+        mode_line = f"mode replay {idx}" + (" servos" if servos else "")
+        self.replay_cancel = False
+        self.replay_btn.configure(text="Cancel")
+        self.event(f"replay: waiting to send '{mode_line}'")
+
+        def run():
+            put = self.replay_queue.put
+            try:
+                ser = wait_for_boot_and_send(mode_line, lambda s: put(("status", s)),
+                                             lambda: self.replay_cancel)
+                put(("ready", (ser, mode_line)))
+            except Exception as e:
+                put(("failed", str(e)))
+
+        self.replay_thread = threading.Thread(target=run, daemon=True)
+        self.replay_thread.start()
+
+    def _poll_replay(self):
+        try:
+            while True:
+                kind, payload = self.replay_queue.get_nowait()
+                if kind == "status":
+                    self.replay_status.set(payload)
+                elif kind == "failed":
+                    self.replay_btn.configure(text="Start replay")
+                    self.replay_status.set(f"Replay not started: {payload}")
+                    self.event(f"replay not started: {payload}")
+                elif kind == "ready":
+                    ser, mode_line = payload
+                    self.replay_btn.configure(text="Start replay")
+                    self.replay_status.set(f"Sent '{mode_line}'. Watch the events for 'mode: replay'.")
+                    self._attach_link(SerialLink(ser.port, ser=ser), ser.port)
+                    self.event(f"sent '{mode_line}'")
+        except queue.Empty:
+            pass
+
+    def _handle_board_text(self, line: str):
+        """USB only: a line that is not a $-message (boot banners, replay
+        results, the log listing). Shown in the events."""
+        text = line.strip()
+        if not text:
+            return
+        if text == "---LIST BEGIN---":
+            self.in_listing = True
+            self.event("SD logs on the board:")
+            return
+        if text == "---LIST END---":
+            self.in_listing = False
+            return
+        self.event(("    " if self.in_listing else "board: ") + text[:200])
+        if USB_DIRECT and text.startswith(("mode: replay", "# replay done")):
+            self.replay_status.set(text[:200])
+
     def _refresh_ports(self):
         ports = list_ports() + [SIMULATED_PORT]
         self.port_box["values"] = ports
@@ -568,10 +795,17 @@ class TelemetryApp:
             return
         port = self.port_var.get()
         try:
-            self.link = open_link(port)
+            link = open_link(port)
         except Exception as e:  # serial errors come in several types
             messagebox.showerror("Connect failed", str(e))
             return
+        self._attach_link(link, port)
+
+    def _attach_link(self, link, port: str):
+        """Starts a session on an open link: the Connect button, or the SD
+        replay once it has sent its mode line."""
+        self.link = link
+        self.in_listing = False
         self.log = SessionLog()
         self.deframer = Deframer(CALLSIGN)
         self.splitter = LineSplitter()
@@ -582,6 +816,8 @@ class TelemetryApp:
         self.connect_btn.configure(text="Disconnect")
         for b in self.cmd_buttons:
             b.configure(state=tk.NORMAL)
+        if USB_DIRECT:
+            self.list_btn.configure(state=tk.NORMAL)
         self.status_var.set(f"Connected to {port}, logging to {self.log.dir}")
         self.event(f"connected to {port}")
 
@@ -596,6 +832,8 @@ class TelemetryApp:
         self.connect_btn.configure(text="Connect")
         for b in self.cmd_buttons:
             b.configure(state=tk.DISABLED)
+        if USB_DIRECT:
+            self.list_btn.configure(state=tk.DISABLED)
         self.status_var.set("Disconnected")
 
     def _reader(self, link):
@@ -636,10 +874,15 @@ class TelemetryApp:
                     self._handle_line(line)
         except queue.Empty:
             pass
+        if USB_DIRECT:
+            self._poll_replay()
         self._update_link_status()
         self.root.after(50, self._poll)
 
     def _handle_line(self, line: str):
+        if USB_DIRECT and not line.lstrip().startswith("$"):
+            self._handle_board_text(line)
+            return
         try:
             msg_type, fields = parse_line(line)
         except BadLine:

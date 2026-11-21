@@ -29,8 +29,8 @@ RocketPy 1.13 and netCDF4 (for the forecast):
     $SIM/.venv/bin/python tools/rocketpy_flight.py --site cherryfield \\
         --date 2026-11-22 --hour 12 -o canardsLog70.csv
 
-Then copy the CSV to the SD card as /logs/canardsLog<N>.csv and replay it
-(tools/usb_stream.py replay <N> --servos --detach).
+Then replay it from the ground station (ground/telemetry_gui.py --usb --flight):
+"Copy flight to SD card..." puts it on the card, then "Start replay".
 """
 
 import argparse
@@ -115,6 +115,13 @@ def fly(args):
         print("Fetching the GFS forecast for %s (%.3f, %.3f) at %s %02d:00 %s ..."
               % (args.site, lat, lon, args.date, args.hour, tz), file=sys.stderr)
         env.set_atmospheric_model(type="Forecast", file="GFS")
+    elif args.wind is not None:
+        # Standard pressure and temperature, one constant wind at every height.
+        # --wind-from is where the wind comes FROM (0 = north), as forecasts say.
+        to_rad = math.radians(args.wind_from + 180.0)
+        env.set_atmospheric_model(type="custom_atmosphere", pressure=None, temperature=None,
+                                  wind_u=args.wind * math.sin(to_rad),   # toward east
+                                  wind_v=args.wind * math.cos(to_rad))   # toward north
     else:
         env.set_atmospheric_model(type="standard_atmosphere")
     # A forecast replaces the elevation with the model's ground height. Keep
@@ -344,6 +351,10 @@ def main(argv=None):
     p.add_argument("--hour", type=int, default=12, help="launch hour, local time (default 12)")
     p.add_argument("--weather", choices=["forecast", "standard"], default="forecast",
                    help="GFS forecast (needs internet) or the standard atmosphere with no wind")
+    p.add_argument("--wind", type=float,
+                   help="with --weather standard: a constant wind, m/s, at every height")
+    p.add_argument("--wind-from", type=float, default=0.0,
+                   help="where --wind comes FROM, deg (0 north, 90 east; default %(default)s)")
     p.add_argument("--rate", type=float, default=208.0, help="IMU sample rate, Hz (the board's: 208)")
     p.add_argument("--mag-hz", type=float, default=100.0)
     p.add_argument("--baro-hz", type=float, default=75.0)

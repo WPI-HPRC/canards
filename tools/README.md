@@ -85,23 +85,32 @@ waits. Replay and stream are never flight-ready: no watchdog, no log download,
 no ground-station commands; telemetry rows still go out with `sim_mode` = 1
 (replay) or 2 (stream). The servos move only with `servos`.
 
-`usb_stream.py` handles the timing: it asks you to reset the board, waits for
-the USB port to go away and come back, opens it at once and sends the mode
-line. It always opens the port at 115200 baud: **never open it at 1200 baud**,
+The ground station sends `mode replay` (the only way to start an SD replay);
+`usb_stream.py` sends `mode stream`. Both handle the timing: they wait for the
+USB port to go away and come back, open it at once and send the mode line. It always opens the port at 115200 baud: **never open it at 1200 baud**,
 that reboots the board into its DFU bootloader.
 
 ## Replay a log on the board
 
+Only from the ground station:
+
 ```bash
-python3 tools/usb_stream.py replay 7              # paced by the recorded sample times
-python3 tools/usb_stream.py replay 7 --fast       # as fast as the SD log keeps up
-python3 tools/usb_stream.py replay 7 --servos     # and let the servos move (OPEN LOOP)
-python3 tools/usb_stream.py replay 7 --servos --detach   # let go of the port once it starts, so
-                                                         # ground/telemetry_gui.py --usb --flight can watch
+.venv/bin/python ground/telemetry_gui.py --usb --flight
 ```
 
-(Or type `mode replay 7` into a serial terminal within 1.5 s of the board's
-boot messages.) The board replays `/logs/canardsLog7.csv` through the real
+In its **SD replay** panel:
+1. **Copy flight to SD card...** (with the card in this computer) puts a CSV on
+   the card under a free log number, never overwriting one, and fills in Log #.
+   Eject the card and put it back in the board.
+2. Tick **Move servos** to let the canards move (OPEN LOOP).
+3. **Start replay**, then power the board up **from cold**: unplug DC and USB,
+   plug in USB (then DC for the servos). The SD card does not come back after
+   a reset or a reflash without a power-cycle. The GUI sends the mode line in
+   the boot window and shows the replay's telemetry.
+
+**List SD logs** (connected, in Flight mode) shows what is on the board's card.
+
+The board replays `/logs/canardsLog7.csv` through the real
 flight program and writes its own new log, this boot's file (the banner names
 it). When it ends it prints `# replay done: ...`. Then reboot normally,
 download both logs (into `logs/`, named with a time stamp), and compare:
