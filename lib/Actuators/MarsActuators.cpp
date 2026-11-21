@@ -85,7 +85,13 @@ bool MarsActuators::begin() {
   configureOutput(kLevelShiftPin, kLevelShiftOnLevelHigh);  // pass pulses
 
   diagnostics_.servosOk = beginServos();
+#if defined(CANARDS_NO_ENCODERS)
+  // Bench diagnosis only (build with -DCANARDS_NO_ENCODERS): no capture
+  // interrupts at all; every encoder reads invalid, so the servos run open loop.
+  diagnostics_.encodersOk = false;
+#else
   diagnostics_.encodersOk = beginEncoders();
+#endif
   diagnostics_.beginOk = diagnostics_.servosOk && diagnostics_.encodersOk;
 
   // Pulses first, then power, so the servos wake up to a valid command.
@@ -174,6 +180,7 @@ bool MarsActuators::beginEncoders() {
 
 // Capture interrupt for one encoder input.
 void MarsActuators::recordEdge(unsigned input) {
+  edges_ = edges_ + 1;
   const uint16_t captureTicks =
       static_cast<uint16_t>(captureTimerOf_[input]->getCaptureCompare(kCaptureChannel[input]));
   const bool high = digitalRead(kEncoderPins[input]) == HIGH;

@@ -107,6 +107,11 @@ class MarsActuators final : public Actuators {
   bool isPowered() const { return powered_; }
   const Diagnostics& diagnostics() const { return diagnostics_; }
 
+  // Encoder capture interrupts since boot, all four inputs. On the bench this
+  // shows an interrupt storm (a floating or noisy encoder line): a healthy
+  // MA4 gives two edges per PWM period per input.
+  uint32_t encoderEdges() const { return edges_; }
+
   // One encoder INPUT (0..3, not a servo channel), raw. Never blocks.
   EncoderReading readEncoderInput(unsigned input) const;
 
@@ -118,6 +123,7 @@ class MarsActuators final : public Actuators {
   bool beginEncoders();
   void writePower(bool on);
   void recordEdge(unsigned input);
+  volatile uint32_t edges_ = 0;
   ma4::PwmSample sampleOf(unsigned input, uint32_t& nowUs) const;
 
   float centerPulseUs_[kNumCanards];

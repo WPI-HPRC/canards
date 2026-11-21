@@ -236,6 +236,7 @@ const TelemetryColumn tlmColumns[] = {
     TLM_UINT("imu_rd_us", sensorPeaks.imuUs),        // parts of read_max_us, by chip
     TLM_UINT("mag_rd_us", sensorPeaks.magUs),
     TLM_UINT("baro_rd_us", sensorPeaks.baroUs),
+    TLM_UINT("enc_edges", actuators.encoderEdges()),  // since boot; a few thousand per second is normal (2 edges per MA4 period, 4 inputs), far more is a storm
     TLM_UINT("imu_missed", sensors.missedSamples()),
     TLM_UINT("log_rows", sdLog.rowsWritten()),
     TLM_UINT("log_drop", sdLog.dropped()),
@@ -464,7 +465,11 @@ void setup() {
   if (initializeSD()) sdLog.begin(sdLogFile());
   sensors.begin();
   actuators.begin();
-  const bool radioOk = radioLinkBegin();
+  // RADIO DISABLED (2026-11-21): the E22 at 33 dBm is the suspect for USB
+  // dropping whenever DC power is on. Nothing is configured or sent over the
+  // radio; telemetry and commands are USB only. To re-enable, uncomment this
+  // line and the telemetry.begin() line below.
+  // const bool radioOk = radioLinkBegin();
 
   boot = selectBootMode();
   const char* why = "";
@@ -484,7 +489,8 @@ void setup() {
   // ground station can watch a replay over USB). Commands are read in Flight
   // only. Stream mode owns the USB port, so no console there.
   if (boot.mode != BootMode::Stream) console.begin(tlmColumns);
-  telemetry.begin(radioLink(), tlmColumns, radioOk);
+  // RADIO DISABLED: without begin() the radio telemetry never sends.
+  // telemetry.begin(radioLink(), tlmColumns, radioOk);
 
   switch (boot.mode) {
     case BootMode::Flight:

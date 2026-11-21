@@ -10,3 +10,4 @@ tools/.flatc_version
 ground/ground_logs
 __pycache__/
 logs/
+.venv/
