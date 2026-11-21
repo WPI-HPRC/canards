@@ -136,7 +136,8 @@ FLIGHT_PLOTS = [
     {"title": "Altitude (estimate)", "ylabel": "m",   "series": ["alt_m"]},
     {"title": "Speed (estimate)",    "ylabel": "m/s", "series": ["speed"]},
     {"title": "Tilt",                "ylabel": "deg", "series": ["tilt_deg"]},
-    {"title": "Specific force",      "ylabel": "g",   "series": ["sf_g"]},
+    {"title": "Accel, body axes",    "ylabel": "g",   "series": ["sf_g", "fx_g", "fy_g", "fz_g"]},
+    {"title": "Rate, body axes",     "ylabel": "deg/s", "series": ["p_dps", "q_dps", "r_dps"]},
 ]
 
 # Line colors, used in order within each plot (a fixed order, so the first

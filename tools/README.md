@@ -118,6 +118,9 @@ the new code first decides something else.
 ```bash
 python3 tools/usb_stream.py stream LOG.csv -o replies.csv     # a recorded log, as it is
 python3 tools/usb_stream.py stream --synthetic                # a generated flight
+python3 tools/usb_stream.py stream --synthetic --roll-rate 20 --servos -o sign.csv
+                                       # control-sign check: in Control, cmd0..3 must be NEGATIVE
+                                       # (the canards oppose a +roll, clockwise seen from the tail)
 python3 tools/usb_stream.py synthetic > synth.csv             # just print the generated rows
 ```
 

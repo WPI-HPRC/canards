@@ -35,6 +35,7 @@ Needs pyserial (tools/requirements.txt).
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -145,12 +146,20 @@ def pressure_at(alt_m):
     return 101325.0 * (1.0 - 2.25577e-5 * alt_m) ** 5.25588
 
 
-def synthetic_lines(rate_hz=200.0, pad_s=5.0, burn_s=1.5, burn_g=7.0, coast_drag_g=0.3, descent_mps=8.0):
+def synthetic_lines(rate_hz=200.0, pad_s=5.0, burn_s=1.5, burn_g=7.0, coast_drag_g=0.3, descent_mps=8.0,
+                    roll_rate_dps=0.0):
     """A short scripted vertical flight, in the input row format: on the pad
     (arm commands at 1 s), a 7 g (over the 5 g launch threshold) burn,
     a coast with drag up to apogee, a steady descent under the chute, then
     on the ground. Sensor axes: the IMU's +z is the nose
-    (include/VehicleConfig.h kImuToBody). No noise: easy to reason about."""
+    (include/VehicleConfig.h kImuToBody). No noise: easy to reason about.
+
+    roll_rate_dps: a constant roll rate about the nose during burn and coast
+    (positive = clockwise seen from the tail = +roll). For the control-sign
+    check: while the board is in Control the canards must OPPOSE it, so a
+    positive rate must give negative cmd0..3 (leading edges anticlockwise
+    seen from the tail)."""
+    roll_rate = math.radians(roll_rate_dps)
     yield INPUT_HEADER
     dt = 1.0 / rate_hz
     t0_us = 1000000
@@ -184,7 +193,7 @@ def synthetic_lines(rate_hz=200.0, pad_s=5.0, burn_s=1.5, burn_g=7.0, coast_drag
         row = [
             str(t0_us + k * period_us), "1",
             "0", "0", "%.9g" % sf,              # accel, sensor axes
-            "0", "0", "0",                       # gyro
+            "0", "0", "%.9g" % (roll_rate if phase in ("burn", "coast") else 0.0),  # gyro, rad/s; +z = nose
             str(mag_new), "20", "1", "45",       # mag, uT
             str(baro_new), "%.9g" % pressure_at(h), "20",
             "0", "0", "0", "0", "0",             # no encoder feedback
@@ -214,7 +223,8 @@ def looks_like_row(line):
 def cmd_stream(args):
     if not args.synthetic and not args.log:
         raise SystemExit("give a LOG.csv or --synthetic")
-    lines = synthetic_lines(rate_hz=args.rate) if args.synthetic else log_lines(args.log)
+    lines = (synthetic_lines(rate_hz=args.rate, roll_rate_dps=args.roll_rate) if args.synthetic
+             else log_lines(args.log))
     out_path = args.output or ("stream_synthetic_replies.csv" if args.synthetic else
                                os.path.splitext(os.path.basename(args.log))[0] + "_stream.csv")
 
@@ -312,6 +322,9 @@ def main(argv=None):
     s.add_argument("--synthetic", action="store_true", help="a generated flight instead of a log")
     s.add_argument("--rate", type=float, default=200.0, help="synthetic sample rate, Hz (default 200)")
     s.add_argument("--servos", action="store_true", help="let the servos move")
+    s.add_argument("--roll-rate", type=float, default=0.0, metavar="DPS",
+                   help="synthetic: constant roll rate during burn and coast, deg/s "
+                        "(+ = clockwise seen from the tail); for the control-sign check")
     s.add_argument("--timeout", type=float, default=2.0, help="seconds to wait for each reply")
     s.add_argument("-o", "--output", help="where to save the replies (a CSV log)")
 
@@ -322,10 +335,13 @@ def main(argv=None):
 
     g = sub.add_parser("synthetic", help="print the synthetic flight's rows (no board needed)")
     g.add_argument("--rate", type=float, default=200.0)
+    g.add_argument("--roll-rate", type=float, default=0.0, metavar="DPS",
+                   help="synthetic: constant roll rate during burn and coast, deg/s "
+                        "(+ = clockwise seen from the tail); for the control-sign check")
 
     args = p.parse_args(argv)
     if args.cmd == "synthetic":
-        for line in synthetic_lines(rate_hz=args.rate):
+        for line in synthetic_lines(rate_hz=args.rate, roll_rate_dps=args.roll_rate):
             print(line)
         return 0
     if args.cmd == "stream":

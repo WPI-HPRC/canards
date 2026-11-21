@@ -192,6 +192,15 @@ const TelemetryColumn tlmColumns[] = {
     TLM_FLOAT("alt_m", flight.navigation().altitudeAgl(), 1),
     TLM_FLOAT("tilt_deg", flight.navigation().tilt() * 57.29578f, 1),
     TLM_FLOAT("sf_g", flight.navigation().specificForce() / FlightConfig::kGravity, 2),
+    // Body axes (mount map applied), straight from the IMU: for the bench
+    // orientation checks (nose up: fx_g = +1; turning clockwise seen from the
+    // tail: p_dps > 0). Drop them if the downlink needs the airtime.
+    TLM_FLOAT("fx_g", flight.navigation().accelBody().x / FlightConfig::kGravity, 2),
+    TLM_FLOAT("fy_g", flight.navigation().accelBody().y / FlightConfig::kGravity, 2),
+    TLM_FLOAT("fz_g", flight.navigation().accelBody().z / FlightConfig::kGravity, 2),
+    TLM_FLOAT("p_dps", flight.navigation().gyroBody().x * 57.29578f, 1),
+    TLM_FLOAT("q_dps", flight.navigation().gyroBody().y * 57.29578f, 1),
+    TLM_FLOAT("r_dps", flight.navigation().gyroBody().z * 57.29578f, 1),
     TLM_UINT("safety", flight.safety().sticky()),
     TLM_UINT("gates", flight.canards().status().gates),
     TLM_UINT("cyc_max_us", peakCycleUs.reported),
