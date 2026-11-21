@@ -17,13 +17,14 @@
 
 #include "sdcard.h"
 #include "max10s.h"
+#include "csvlog.h"
+#include "logdump.h"
 
 
 // Debug output over SerialUSB, only in DEBUG builds (the marsv21_debug /
 // marsv20_debug envs). Comment out what you don't need.
 #ifdef DEBUG
 #define SENSOR_CHECK   // at boot: per-device init result, WHO_AM_I check and a summary
-#define SD_TEST        // at boot: write/read-back test of a CSV on the SD card
 #define SENSOR_PRINT   // in loop: IMU, mag and baro readings    } both on one line,
 #define GPS_PRINT      // in loop: GPS fix, position and velocity } see debugPrint()
 #define RADIO_DEBUG
@@ -110,7 +111,6 @@ void debugPrint();
 // Init results, for the boot summary.
 struct DeviceStatus {
   bool sd = false;
-  bool sdTest = false;
   bool gps = false;
   bool lsm = false;
   bool asm330 = false;
@@ -119,6 +119,66 @@ struct DeviceStatus {
   int8_t radioCode = -1; // LoRaE22::init(): 0 ok, 1 ok after programming, -1 failed
 };
 DeviceStatus deviceStatus;
+
+// Latest sensor readings, filled by sensorUpdate().
+struct SensorReadings {
+  int32_t lsmAccel[3] = {};  // mg
+  int32_t lsmGyro[3] = {};   // mdps
+  int32_t asmAccel[3] = {};  // mg
+  int32_t asmGyro[3] = {};   // mdps
+  int32_t mag[3] = {};       // mgauss
+  float pressure = 0;        // hPa
+  float temperature = 0;     // C
+  bool lsmOk = false, asmOk = false, lisOk = false, lpsOk = false;
+};
+static SensorReadings readings;
+
+static uint32_t loopCount = 0;
+
+// Columns of the per-boot CSV log (/logs/canardsLog<N>.csv), one row per
+// loop(). To log something new, add a line here; the header follows the
+// table. Values are logged raw in the units named in each column.
+static const CsvColumn logColumns[] = {
+  CSV_UINT("time_ms", millis()),
+  CSV_UINT("loop", loopCount),
+
+  CSV_INT("lsm_ok", readings.lsmOk),
+  CSV_INT("lsm_ax_mg", readings.lsmAccel[0]),
+  CSV_INT("lsm_ay_mg", readings.lsmAccel[1]),
+  CSV_INT("lsm_az_mg", readings.lsmAccel[2]),
+  CSV_INT("lsm_gx_mdps", readings.lsmGyro[0]),
+  CSV_INT("lsm_gy_mdps", readings.lsmGyro[1]),
+  CSV_INT("lsm_gz_mdps", readings.lsmGyro[2]),
+
+  CSV_INT("asm_ok", readings.asmOk),
+  CSV_INT("asm_ax_mg", readings.asmAccel[0]),
+  CSV_INT("asm_ay_mg", readings.asmAccel[1]),
+  CSV_INT("asm_az_mg", readings.asmAccel[2]),
+  CSV_INT("asm_gx_mdps", readings.asmGyro[0]),
+  CSV_INT("asm_gy_mdps", readings.asmGyro[1]),
+  CSV_INT("asm_gz_mdps", readings.asmGyro[2]),
+
+  CSV_INT("lis_ok", readings.lisOk),
+  CSV_INT("mag_x_mgauss", readings.mag[0]),
+  CSV_INT("mag_y_mgauss", readings.mag[1]),
+  CSV_INT("mag_z_mgauss", readings.mag[2]),
+
+  CSV_INT("lps_ok", readings.lpsOk),
+  CSV_FLOAT("pressure_hpa", readings.pressure, 3),
+  CSV_FLOAT("temp_c", readings.temperature, 2),
+
+  // GPS values repeat between solutions; gps_updated_ms changes on each new one.
+  CSV_UINT("gps_updated_ms", gps.lastUpdated()),
+  CSV_UINT("gps_fix", gps.data().gpsLockType),
+  CSV_UINT("gps_sats", gps.data().satellites),
+  CSV_FLOAT("gps_lat_deg", gps.data().lat, 7),
+  CSV_FLOAT("gps_lon_deg", gps.data().lon, 7),
+  CSV_FLOAT("gps_alt_msl_m", gps.data().altMSL, 2),
+  CSV_INT("gps_vel_n_mmps", gps.data().velN),
+  CSV_INT("gps_vel_e_mmps", gps.data().velE),
+  CSV_INT("gps_vel_d_mmps", gps.data().velD),
+};
+static CsvLogger csvLog;
 
 
 void setup()
@@ -144,11 +204,11 @@ void setup()
   
   
   deviceStatus.sd = initializeSD();
-  #ifdef SD_TEST
-  deviceStatus.sdTest = sdCsvSelfTest();
-  #endif
   gpsInit();
   sensorInit();
+  if (deviceStatus.sd) {
+    csvLog.begin(sdLogFile(), logColumns);
+  }
   // radioInit();
   printSensorSummary();
 }
@@ -157,11 +217,13 @@ unsigned long long counterBufferNotEmpty = 0;
 void loop()
 {
   digitalToggle(LED_GREEN);
+  loopCount++;
 
-  
   sensorUpdate();
   // radioUpdate();
   gpsUpdate();
+  csvLog.logRow();
+  logDumpPoll();
 
   // SerialUSB.println(String(analogRead(MOSFET_CURRENT)));
 
@@ -320,9 +382,6 @@ void printSensorSummary(){
   auto res = [](bool ok) { return ok ? "OK" : "FAILED"; };
   SerialUSB.println("========== Device check ==========");
   SerialUSB.printf("SD card    %s\n", res(deviceStatus.sd));
-  #ifdef SD_TEST
-  SerialUSB.printf("SD CSV     %s\n", res(deviceStatus.sdTest));
-  #endif
   SerialUSB.printf("LSM6DSO32  %s\n", res(deviceStatus.lsm));
   SerialUSB.printf("ASM330LHH  %s\n", res(deviceStatus.asm330));
   SerialUSB.printf("LIS2MDL    %s\n", res(deviceStatus.lis));
@@ -336,19 +395,6 @@ void printSensorSummary(){
 static float magnitude(const int32_t v[3]){
   return sqrtf((float)v[0] * v[0] + (float)v[1] * v[1] + (float)v[2] * v[2]);
 }
-
-// Latest sensor readings, kept for debugPrint().
-struct SensorReadings {
-  int32_t lsmAccel[3] = {};  // mg
-  int32_t lsmGyro[3] = {};   // mdps
-  int32_t asmAccel[3] = {};  // mg
-  int32_t asmGyro[3] = {};   // mdps
-  int32_t mag[3] = {};       // mgauss
-  float pressure = 0;        // hPa
-  float temperature = 0;     // C
-  bool lsmOk = false, asmOk = false, lisOk = false, lpsOk = false;
-};
-static SensorReadings readings;
 
 void sensorUpdate()
 {
