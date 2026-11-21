@@ -7,6 +7,8 @@
 namespace {
 
 // LSM6DSO32 registers (datasheet DS13202).
+constexpr uint8_t kRegCounterBdr1 = 0x0B;  // bit 7: dataready_pulsed
+constexpr uint8_t kDataReadyPulsed = 0x80;
 constexpr uint8_t kRegInt1Ctrl = 0x0D;   // bit 1: INT1_DRDY_G
 constexpr uint8_t kRegStatus = 0x1E;     // bit 0: XLDA, bit 1: GDA
 constexpr uint8_t kInt1DrdyG = 0x02;
@@ -61,6 +63,14 @@ bool LiveSensorSource::begin() {
   // Gyro data-ready on INT1. Attach before routing, so the first edge is not
   // lost. read() polls the status register as well, so a missed edge can
   // never stall sampling.
+  //
+  // PULSED data-ready (about 75 us per sample), not the default latched
+  // level: a latched pin stays high when the loop is late, so a missed sample
+  // gives no new edge. It was then neither counted nor time-stamped, and the
+  // late sample took the previous sample's time.
+  uint8_t bdr1 = 0;
+  lsm_.Read_Reg(kRegCounterBdr1, &bdr1);
+  lsm_.Write_Reg(kRegCounterBdr1, bdr1 | kDataReadyPulsed);
   pinMode(LSM_INT1, INPUT);
   attachInterrupt(digitalPinToInterrupt(LSM_INT1), onGyroReady, RISING);
   lsm_.Write_Reg(kRegInt1Ctrl, kInt1DrdyG);
@@ -70,23 +80,33 @@ bool LiveSensorSource::begin() {
 }
 
 bool LiveSensorSource::read(SensorFrame& out) {
-  const uint32_t now32 = micros();
-  const uint64_t now64 = clock_.extend(now32);
-
   uint8_t st = 0;
-  if (lsm_.Read_Reg(kRegStatus, &st) != LSM6DSO32_OK || (st & kStatusGda) == 0) return false;
+  if (lsm_.Read_Reg(kRegStatus, &st) != LSM6DSO32_OK || (st & kStatusGda) == 0) {
+    clock_.extend(micros());  // keep the 64-bit clock fed between samples
+    return false;
+  }
 
-  // The sample's time: from the interrupt if it fired for this sample.
+  // The sample's time: from the interrupt if it fired for this sample. Take
+  // "now" AFTER copying the interrupt's time stamp. Taken before, an edge
+  // arriving in between made the stamp newer than "now"; the unsigned
+  // difference then wrapped and the sample was dated ~71 minutes off
+  // (seen on the bench 2026-11-22 as ImuGap + TimeBackwards faults).
   noInterrupts();
   const uint32_t isrCount = gIsrCount;
   const uint32_t isrMicros = gIsrMicros;
   interrupts();
+  const uint32_t now32 = micros();
+  const uint64_t now64 = clock_.extend(now32);
   const uint32_t edges = isrCount - lastIsrCount_;
   lastIsrCount_ = isrCount;
   if (edges > 1) missed_ += edges - 1;
 
   SensorFrame f;
-  f.timeUs = edges > 0 ? MicrosClock64::backdate(now64, now32, isrMicros) : now64;
+  // Defensive: never date a sample after "now", nor more than one sample
+  // period plus a margin before it (a stale stamp from a lost edge).
+  const uint32_t age = now32 - isrMicros;
+  const bool stampUsable = edges > 0 && age <= 4u * kImuPeriodUs;
+  f.timeUs = stampUsable ? MicrosClock64::backdate(now64, now32, isrMicros) : now64;
 
   int32_t accel[3] = {}, gyro[3] = {};
   f.imuOk = lsm_.Get_X_Axes(accel) == LSM6DSO32_OK;

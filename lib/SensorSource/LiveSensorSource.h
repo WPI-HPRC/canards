@@ -31,6 +31,7 @@ class LiveSensorSource final : public SensorSource {
   // step the LQR gains were designed for. PLACEHOLDER (user / GNC): the
   // control rate is this rate.
   static constexpr float kImuOdrHz = 208.0f;
+  static constexpr uint32_t kImuPeriodUs = 4808;    // 1 / kImuOdrHz
   static constexpr uint64_t kMagPeriodUs = 10000;   // LIS2MDL at 100 Hz
   static constexpr uint64_t kBaroPeriodUs = 13333;  // LPS22HB at 75 Hz
 
