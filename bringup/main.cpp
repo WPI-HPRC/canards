@@ -425,6 +425,8 @@ void loop()
   float curr_s = millis() / 1000.0;
   float dt = curr_s - prev_time_s;
 
+
+  //TODO: This block runs about 1 min before flight (during pre-flight)
   if (curr_s < 15.0) {
     estimator.initialize_loop(gyro);
   } else if (curr_s < 16.0) {
