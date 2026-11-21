@@ -113,29 +113,6 @@ StreamSession stream;
 
 // The FlightComputer is built once, against these; setup() points them at the
 // live hardware or at replay / stream, once, before the first cycle.
-class SelectedSensors final : public SensorSource {
- public:
-  SensorSource* target = &sensors;
-  bool read(SensorFrame& out) override { return target->read(out); }
-};
-class SelectedCommands final : public CommandSource {
- public:
-  CommandSource* target = &ground;
-  bool poll(Command& out) override { return target->poll(out); }
-};
-class SelectedActuators final : public Actuators {
- public:
-  Actuators* target = &actuators;
-  void readFeedback(ActuatorFeedback& out) override { target->readFeedback(out); }
-  void write(const ActuatorCommand& command) override { target->write(command); }
-};
-SelectedSensors selectedSensors;
-SelectedCommands selectedCommands;
-SelectedActuators selectedActuators;
-
-FlightComputer flight(FlightIo{selectedSensors, selectedCommands, selectedActuators, estimator, controller, sdLog},
-                      VehicleConfig::kServoConfig);
-
 // --- Loop timing, for telemetry --------------------------------------------------
 // The peak over each kPeakWindowMs window. Reported values change only when a
 // window closes, so the radio and the USB console (two readers, at their own
@@ -153,8 +130,51 @@ struct Peak {
     current = 0;
   }
 };
-Peak peakCycleUs;  // longest FlightComputer::cycle()
-Peak peakGapUs;    // longest time between IMU samples
+Peak peakCycleUs;     // longest FlightComputer::cycle()
+Peak peakGapUs;       // longest time between IMU samples
+Peak peakReadUs;      // longest sensor read (inside the cycle)
+Peak peakFeedbackUs;  // longest encoder feedback read (inside the cycle)
+Peak peakWriteUs;     // longest servo write (inside the cycle)
+
+// The FlightComputer's sources and sinks, pointed at the live hardware or at
+// replay / stream once in setup(). They also time the hardware calls made
+// inside a cycle, so a slow cycle can be traced to its part.
+class SelectedSensors final : public SensorSource {
+ public:
+  SensorSource* target = &sensors;
+  bool read(SensorFrame& out) override {
+    const uint32_t start = micros();
+    const bool ok = target->read(out);
+    if (ok) peakReadUs.add(micros() - start);
+    return ok;
+  }
+};
+class SelectedCommands final : public CommandSource {
+ public:
+  CommandSource* target = &ground;
+  bool poll(Command& out) override { return target->poll(out); }
+};
+class SelectedActuators final : public Actuators {
+ public:
+  Actuators* target = &actuators;
+  void readFeedback(ActuatorFeedback& out) override {
+    const uint32_t start = micros();
+    target->readFeedback(out);
+    peakFeedbackUs.add(micros() - start);
+  }
+  void write(const ActuatorCommand& command) override {
+    const uint32_t start = micros();
+    target->write(command);
+    peakWriteUs.add(micros() - start);
+  }
+};
+SelectedSensors selectedSensors;
+SelectedCommands selectedCommands;
+SelectedActuators selectedActuators;
+
+FlightComputer flight(FlightIo{selectedSensors, selectedCommands, selectedActuators, estimator, controller, sdLog},
+                      VehicleConfig::kServoConfig);
+
 uint32_t peakWindowStartMs = 0;
 bool watchdogRunning = false;
 
@@ -163,6 +183,9 @@ void closePeakWindow(uint32_t nowMs) {
   peakWindowStartMs = nowMs;
   peakCycleUs.closeWindow();
   peakGapUs.closeWindow();
+  peakReadUs.closeWindow();
+  peakFeedbackUs.closeWindow();
+  peakWriteUs.closeWindow();
 }
 
 // --- Ground-station commands (ground/telemetry_gui.py), Flight mode only -------
@@ -205,6 +228,9 @@ const TelemetryColumn tlmColumns[] = {
     TLM_UINT("gates", flight.canards().status().gates),
     TLM_UINT("cyc_max_us", peakCycleUs.reported),
     TLM_UINT("gap_max_us", peakGapUs.reported),
+    TLM_UINT("read_max_us", peakReadUs.reported),    // parts of cyc_max_us: sensor read,
+    TLM_UINT("fb_max_us", peakFeedbackUs.reported),  // encoder feedback,
+    TLM_UINT("wr_max_us", peakWriteUs.reported),     // servo write
     TLM_UINT("imu_missed", sensors.missedSamples()),
     TLM_UINT("log_rows", sdLog.rowsWritten()),
     TLM_UINT("log_drop", sdLog.dropped()),
