@@ -54,6 +54,19 @@ class LiveSensorSource final : public SensorSource {
   // Gyro samples that arrived (interrupt) but were overwritten before read()
   // got to them. A rising count means the loop is too slow for kImuOdrHz.
   uint32_t missedSamples() const { return missed_; }
+
+  // Longest time spent reading each chip since the last call, us. For the
+  // bench: a read that stalls the SPI bus shows up here by chip.
+  struct ReadPeaks {
+    uint32_t imuUs = 0;   // LSM6DSO32 status + accel + gyro
+    uint32_t magUs = 0;   // LIS2MDL
+    uint32_t baroUs = 0;  // LPS22HB pressure + temperature
+  };
+  ReadPeaks takeReadPeaks() {
+    const ReadPeaks p = peaks_;
+    peaks_ = ReadPeaks{};
+    return p;
+  }
   // Microseconds now, on the same 64-bit clock as SensorFrame::timeUs.
   uint64_t nowUs() { return clock_.extend(micros()); }
 
@@ -66,6 +79,7 @@ class LiveSensorSource final : public SensorSource {
   Status status_;
   uint32_t lastIsrCount_ = 0;
   uint32_t missed_ = 0;
+  ReadPeaks peaks_;
   uint64_t lastMagUs_ = 0;
   uint64_t lastBaroUs_ = 0;
   bool haveMag_ = false;

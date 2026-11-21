@@ -79,7 +79,15 @@ bool LiveSensorSource::begin() {
   return status_.lsm;
 }
 
+namespace {
+void notePeak(uint32_t& peak, uint32_t startUs) {
+  const uint32_t took = micros() - startUs;
+  if (took > peak) peak = took;
+}
+}  // namespace
+
 bool LiveSensorSource::read(SensorFrame& out) {
+  const uint32_t imuStart = micros();
   uint8_t st = 0;
   if (lsm_.Read_Reg(kRegStatus, &st) != LSM6DSO32_OK || (st & kStatusGda) == 0) {
     clock_.extend(micros());  // keep the 64-bit clock fed between samples
@@ -113,26 +121,31 @@ bool LiveSensorSource::read(SensorFrame& out) {
   f.imuOk = (lsm_.Get_G_Axes(gyro) == LSM6DSO32_OK) && f.imuOk;
   f.accel = SensorUnits::accelFromMg(accel);
   f.gyro = SensorUnits::gyroFromMdps(gyro);
+  notePeak(peaks_.imuUs, imuStart);
 
   if (!haveMag_ || now64 - lastMagUs_ >= kMagPeriodUs) {
     lastMagUs_ = now64;
     haveMag_ = true;
     int32_t mag[3] = {};
+    const uint32_t magStart = micros();
     if (lis_.GetAxes(mag) == LIS2MDL_OK) {
       f.magFresh = true;
       f.mag = SensorUnits::magFromMgauss(mag);
     }
+    notePeak(peaks_.magUs, magStart);
   }
 
   if (!haveBaro_ || now64 - lastBaroUs_ >= kBaroPeriodUs) {
     lastBaroUs_ = now64;
     haveBaro_ = true;
     float hpa = 0.0f, celsius = 0.0f;
+    const uint32_t baroStart = micros();
     if (lps_.GetPressure(&hpa) == LPS22HB_STATUS_OK && lps_.GetTemperature(&celsius) == LPS22HB_STATUS_OK) {
       f.baroFresh = true;
       f.pressurePa = SensorUnits::pressureFromHpa(hpa);
       f.temperatureC = celsius;
     }
+    notePeak(peaks_.baroUs, baroStart);
   }
 
   out = f;

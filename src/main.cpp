@@ -176,6 +176,7 @@ FlightComputer flight(FlightIo{selectedSensors, selectedCommands, selectedActuat
                       VehicleConfig::kServoConfig);
 
 uint32_t peakWindowStartMs = 0;
+LiveSensorSource::ReadPeaks sensorPeaks;  // the last window's, by chip
 bool watchdogRunning = false;
 
 void closePeakWindow(uint32_t nowMs) {
@@ -186,6 +187,7 @@ void closePeakWindow(uint32_t nowMs) {
   peakReadUs.closeWindow();
   peakFeedbackUs.closeWindow();
   peakWriteUs.closeWindow();
+  sensorPeaks = sensors.takeReadPeaks();
 }
 
 // --- Ground-station commands (ground/telemetry_gui.py), Flight mode only -------
@@ -231,6 +233,9 @@ const TelemetryColumn tlmColumns[] = {
     TLM_UINT("read_max_us", peakReadUs.reported),    // parts of cyc_max_us: sensor read,
     TLM_UINT("fb_max_us", peakFeedbackUs.reported),  // encoder feedback,
     TLM_UINT("wr_max_us", peakWriteUs.reported),     // servo write
+    TLM_UINT("imu_rd_us", sensorPeaks.imuUs),        // parts of read_max_us, by chip
+    TLM_UINT("mag_rd_us", sensorPeaks.magUs),
+    TLM_UINT("baro_rd_us", sensorPeaks.baroUs),
     TLM_UINT("imu_missed", sensors.missedSamples()),
     TLM_UINT("log_rows", sdLog.rowsWritten()),
     TLM_UINT("log_drop", sdLog.dropped()),
