@@ -9,12 +9,18 @@
 //   sticky  set the first time the fault is seen and never cleared, for the
 //           logs.
 //
-// PROPOSAL (not confirmed by the user): a transient fault is NOT latched for
-// the rest of the flight, because one SD-card stall should not end control.
-// Only the active bits affect the canards.
+// A transient fault is NOT latched for the rest of the flight. Only the
+// active bits affect the canards.
+//
+// LAX (the user's choice, 2026-11-21): a fault is only active once it has been
+// present on every check for `holdUs` in a row, or, for an IMU gap, when one
+// gap is longer than `catastrophicGapUs`. raw() is what was seen this cycle
+// before that. sticky records active faults only. With holdUs = 0 and
+// catastrophicGapUs = kMaxImuGapUs it is the old strict monitor.
 
 #include <cstdint>
 
+#include "FlightConfig.h"
 #include "SensorSource.h"
 
 namespace SafetyFault {
@@ -40,6 +46,10 @@ TimeStep makeTimeStep(bool havePrevious, uint64_t previousTimeUs, uint64_t timeU
 
 class SafetyMonitor {
  public:
+  explicit SafetyMonitor(uint64_t holdUs = FlightConfig::kSafetyFaultHoldUs,
+                         uint64_t catastrophicGapUs = FlightConfig::kImuGapCatastrophicUs)
+      : holdUs_(holdUs), catastrophicGapUs_(catastrophicGapUs) {}
+
   // Once per cycle, before the state machine runs.
   // `refusedTransitionCount` is StateMachine::refusedCount(); the monitor
   // raises kTransitionRefused on the cycle after it increases.
@@ -49,10 +59,18 @@ class SafetyMonitor {
   uint16_t active() const { return active_; }
   bool anyActive() const { return active_ != 0; }
 
-  // Every fault seen since boot.
+  // Every fault that was active since boot.
   uint16_t sticky() const { return sticky_; }
 
+  // Faults seen this cycle before the hold: glitches included.
+  uint16_t raw() const { return raw_; }
+
  private:
+  static constexpr int kNumFaults = 5;
+  uint64_t holdUs_;
+  uint64_t catastrophicGapUs_;
+  uint16_t raw_ = 0;
+  uint64_t rawSinceUs_[kNumFaults] = {};  // sample time each raw fault started
   uint16_t active_ = 0;
   uint16_t sticky_ = 0;
   uint32_t lastRefusedCount_ = 0;

@@ -104,6 +104,20 @@ constexpr uint32_t kWatchdogTimeoutUs = 1000 * 1000;        // PLACEHOLDER (user
 // A gap between IMU samples longer than this raises a safety fault.
 constexpr uint64_t kMaxImuGapUs = 25 * kUsPerMs;            // PLACEHOLDER (user): depends on the undecided IMU rate
 
+// How lax the safety faults are (src/Safety/SafetyMonitor.h). A fault only
+// forces the canards to neutral once it has been present on every sample for
+// kSafetyFaultHoldUs in a row, or for an IMU gap longer than
+// kImuGapCatastrophicUs in one go (the loop froze). One glitch never does.
+// The desktop tests (env native) build the strict version: every fault counts
+// on its own cycle, as before.
+#if defined(CANARDS_STRICT_SAFETY)
+constexpr uint64_t kSafetyFaultHoldUs = 0;
+constexpr uint64_t kImuGapCatastrophicUs = kMaxImuGapUs;
+#else
+constexpr uint64_t kSafetyFaultHoldUs = 250 * kUsPerMs;     // PLACEHOLDER (user): "fail over a lot of time"
+constexpr uint64_t kImuGapCatastrophicUs = 250 * kUsPerMs;  // PLACEHOLDER (user): "super catastrophic"
+#endif
+
 // --- Compile-time sanity checks --------------------------------------------
 static_assert(kControlEndSpeed > kChuteSpeed, "Control must end above the Chute speed");
 static_assert(kCanardLimitRad <= kGroundTestLimitRad, "flight limit must not exceed the linkage failsafe");

@@ -367,6 +367,87 @@ static void test_fault_bits_are_distinct() {
   }
 }
 
+// --- The lax monitor (what flies): hold and catastrophic gap ----------------
+
+namespace {
+constexpr uint64_t kHold = 250 * FlightConfig::kUsPerMs;
+constexpr uint64_t kCatastrophic = 250 * FlightConfig::kUsPerMs;
+constexpr uint64_t kSample = 4808;  // 208 Hz
+
+SensorFrame frameAt(uint64_t t, bool imuOk = true) {
+  SensorFrame f;
+  f.timeUs = t;
+  f.imuOk = imuOk;
+  f.accel = Vec3{9.81f, 0.0f, 0.0f};
+  return f;
+}
+}  // namespace
+
+void test_lax_one_glitch_never_counts() {
+  SafetyMonitor m(kHold, kCatastrophic);
+  uint64_t t = kT0;
+  m.check(frameAt(t), makeTimeStep(false, 0, t), 0);
+  // One failed read, one 30 ms gap, one refused transition: all raw, none active.
+  m.check(frameAt(t + kSample, false), makeTimeStep(true, t, t + kSample), 0);
+  TEST_ASSERT_TRUE((m.raw() & SafetyFault::kImuReadFailed) != 0);
+  TEST_ASSERT_EQUAL_UINT16(0, m.active());
+  t += kSample;
+  m.check(frameAt(t + 30000), makeTimeStep(true, t, t + 30000), 0);
+  TEST_ASSERT_TRUE((m.raw() & SafetyFault::kImuGap) != 0);
+  TEST_ASSERT_EQUAL_UINT16(0, m.active());
+  t += 30000;
+  m.check(frameAt(t + kSample), makeTimeStep(true, t, t + kSample), 1);
+  TEST_ASSERT_TRUE((m.raw() & SafetyFault::kTransitionRefused) != 0);
+  TEST_ASSERT_EQUAL_UINT16(0, m.active());
+  TEST_ASSERT_EQUAL_UINT16(0, m.sticky());  // the history only keeps what counted
+}
+
+void test_lax_a_fault_that_lasts_the_hold_counts_then_clears() {
+  SafetyMonitor m(kHold, kCatastrophic);
+  uint64_t t = kT0;
+  m.check(frameAt(t), makeTimeStep(false, 0, t), 0);
+  const uint64_t start = t + kSample;
+  bool sawActive = false;
+  for (uint64_t now = start; now <= start + kHold + kSample; now += kSample) {
+    m.check(frameAt(now, false), makeTimeStep(true, now - kSample, now), 0);
+    const bool active = (m.active() & SafetyFault::kImuReadFailed) != 0;
+    TEST_ASSERT_EQUAL(now - start >= kHold, active);
+    sawActive = sawActive || active;
+    t = now;
+  }
+  TEST_ASSERT_TRUE(sawActive);
+  // A good sample clears it at once, and a new failure starts the hold again.
+  m.check(frameAt(t + kSample), makeTimeStep(true, t, t + kSample), 0);
+  TEST_ASSERT_EQUAL_UINT16(0, m.active());
+  t += kSample;
+  m.check(frameAt(t + kSample, false), makeTimeStep(true, t, t + kSample), 0);
+  TEST_ASSERT_EQUAL_UINT16(0, m.active());
+  TEST_ASSERT_TRUE((m.sticky() & SafetyFault::kImuReadFailed) != 0);
+}
+
+void test_lax_a_catastrophic_gap_counts_at_once() {
+  SafetyMonitor m(kHold, kCatastrophic);
+  m.check(frameAt(kT0), makeTimeStep(false, 0, kT0), 0);
+  const uint64_t t = kT0 + kCatastrophic + 1;
+  m.check(frameAt(t), makeTimeStep(true, kT0, t), 0);
+  TEST_ASSERT_TRUE((m.active() & SafetyFault::kImuGap) != 0);
+  // Just under the limit: not catastrophic, and one gap never lasts the hold.
+  SafetyMonitor n(kHold, kCatastrophic);
+  n.check(frameAt(kT0), makeTimeStep(false, 0, kT0), 0);
+  const uint64_t u = kT0 + kCatastrophic;
+  n.check(frameAt(u), makeTimeStep(true, kT0, u), 0);
+  TEST_ASSERT_EQUAL_UINT16(0, n.active());
+}
+
+void test_flight_config_is_the_lax_monitor_unless_built_strict() {
+#if defined(CANARDS_STRICT_SAFETY)
+  TEST_ASSERT_EQUAL_UINT64(0, FlightConfig::kSafetyFaultHoldUs);
+#else
+  TEST_ASSERT_TRUE(FlightConfig::kSafetyFaultHoldUs > 0);
+#endif
+  TEST_ASSERT_TRUE(FlightConfig::kImuGapCatastrophicUs >= FlightConfig::kMaxImuGapUs);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_time_step_default_is_a_first_step);
@@ -393,5 +474,9 @@ int main(int, char**) {
   RUN_TEST(test_faults_clear_from_active_but_stay_sticky);
   RUN_TEST(test_several_faults_in_one_cycle_are_all_reported);
   RUN_TEST(test_fault_bits_are_distinct);
+  RUN_TEST(test_lax_one_glitch_never_counts);
+  RUN_TEST(test_lax_a_fault_that_lasts_the_hold_counts_then_clears);
+  RUN_TEST(test_lax_a_catastrophic_gap_counts_at_once);
+  RUN_TEST(test_flight_config_is_the_lax_monitor_unless_built_strict);
   return UNITY_END();
 }
