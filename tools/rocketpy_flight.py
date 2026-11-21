@@ -263,7 +263,7 @@ def build_rows(args, env, flight, elev):
     temp_c = np.array([float(env.temperature(z)) for z in z_for_baro]) - 273.15
 
     t_us = 1_000_000 + np.round(k * 1e6 / rate).astype(np.int64)
-    arm_row = int(round(args.arm_at * rate))
+    arm_row = -1 if args.no_arm else int(round(args.arm_at * rate))
 
     lines = [INPUT_HEADER]
     for i in range(n):
@@ -371,10 +371,12 @@ def main(argv=None):
     p.add_argument("--gyro-bias-dps", type=float, default=0.1)
     p.add_argument("--mag-noise", type=float, default=0.3, help="uT")
     p.add_argument("--baro-noise", type=float, default=2.0, help="Pa")
+    p.add_argument("--no-arm", action="store_true",
+                   help="no armFlight: a PASSIVE flight (Init -> Boost, canards locked out at 0 deg)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("-o", "--output", required=True, help="the CSV to write (e.g. canardsLog70.csv)")
     args = p.parse_args(argv)
-    if args.arm_at >= args.pad:
+    if not args.no_arm and args.arm_at >= args.pad:
         raise SystemExit("--arm-at must be before ignition (--pad)")
 
     env, flight, elev = fly(args)
@@ -404,7 +406,12 @@ def main(argv=None):
 
     cfg = read_flight_config()
     print("\nexpected on the board (s from the first row; ignition at %.1f s):" % pad)
-    print("  %7.2f  PreFlight (armFlight in the data)" % args.arm_at)
+    if args.no_arm:
+        print("  PASSIVE (--no-arm): stays in Init until launch, then Boost with locked = 1; the estimator")
+        print("  never aligns, so later states come from timeouts (Control +2 s, Coast +22 s, Chute +52 s).")
+        print("  The times below assume an armed flight.")
+    else:
+        print("  %7.2f  PreFlight (armFlight in the data)" % args.arm_at)
     for name, when in expected_timeline(truth, cfg):
         print(("  %7.2f  %s" % (when, name)) if when is not None else ("           %s" % name))
     print("\nOPEN LOOP: the canards respond on the board but don't change this trajectory.")
