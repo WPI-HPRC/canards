@@ -18,6 +18,7 @@
 #include "sdcard.h"
 #include "max10s.h"
 
+#include "simple_estimator.h"
 
 // Debug output over SerialUSB, only in DEBUG builds (the marsv21_debug /
 // marsv20_debug envs). Comment out what you don't need.
@@ -34,6 +35,10 @@
 static constexpr uint32_t SERIAL_WAIT_TIMEOUT_MS = 60UL * 1000UL;
 
 static constexpr uint32_t DEBUG_PRINT_PERIOD_MS = 200;
+
+// Initialize the estimator object
+SimpleEstimator estimator = SimpleEstimator();
+float prev_time_s = 0.0;
 
 
 // initialize our sensor buses 
@@ -139,8 +144,6 @@ void setup()
 
 
 
-
-
   
   
   deviceStatus.sd = initializeSD();
@@ -154,33 +157,6 @@ void setup()
 }
 
 unsigned long long counterBufferNotEmpty = 0;
-void loop()
-{
-  digitalToggle(LED_GREEN);
-
-  
-  sensorUpdate();
-  // radioUpdate();
-  gpsUpdate();
-
-  // SerialUSB.println(String(analogRead(MOSFET_CURRENT)));
-
-
-
-
-
-
-  // SerialUSB.print(" freq: "); SerialUSB.print(encoder1.getFrequency());
-  // SerialUSB.print(" duty cycle: "); SerialUSB.print(encoder1.getDutyCycle());
-  // SerialUSB.println("");`
-  // servo1.write(90);
-  delay(50);
-
-  debugPrint();
-}
-
-
-
 
 
 
@@ -427,4 +403,65 @@ void debugPrint(){
 
   SerialUSB.println(line);
   #endif
+}
+
+void loop()
+{
+  digitalToggle(LED_GREEN);
+
+  
+  sensorUpdate();
+  // radioUpdate();
+  gpsUpdate();
+
+  // SerialUSB.println(String(analogRead(MOSFET_CURRENT)));
+
+  const SensorReadings &r = readings;
+  BLA::Matrix<3, 1> accel = {r.lsmAccel[0], r.lsmAccel[1], r.lsmAccel[2]};
+  BLA::Matrix<3, 1> gyro = {r.lsmGyro[0], r.lsmGyro[1], r.lsmGyro[2]};
+  BLA::Matrix<3, 1> mag = {r.mag[0], r.mag[1], r.mag[2]};
+  float baro = r.pressure;
+
+  float curr_s = millis() / 1000.0;
+  float dt = curr_s - prev_time_s;
+
+  if (curr_s < 15.0) {
+    estimator.initialize_loop(gyro);
+  } else if (curr_s < 16.0) {
+    estimator.initialize(accel, mag, baro);
+  } else {
+    estimator.flight_loop(gyro, dt);
+    SerialUSB.println(estimator.get_orientation_rpy());
+    SerialUSB.println(estimator.get_height(baro));
+  }
+
+  // Note: After 10 seconds
+
+  // SerialUSB.println(accel);
+  // SerialUSB.println(gyro);
+
+
+
+  // estimator.initialize(accel, mag, baro);
+
+  // estimator.flight_loop(gyro, dt);
+
+  // BLA::Matrix<3, 1> unbiased_gyro = estimator.unbiased_gyro(gyro);
+
+  // BLA::Matrix<3, 1> orientation_rpy = get_orientation_rpy();
+
+  // float height = get_height(baro);
+
+
+
+  // SerialUSB.print(" freq: "); SerialUSB.print(encoder1.getFrequency());
+  // SerialUSB.print(" duty cycle: "); SerialUSB.print(encoder1.getDutyCycle());
+  // SerialUSB.println("");`
+  // servo1.write(90);
+
+  prev_time_s = curr_s;
+
+  delay(50);
+
+  // debugPrint();
 }
