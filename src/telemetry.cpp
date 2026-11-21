@@ -62,12 +62,18 @@ bool Telemetry::begin(LoRaE22 &radio, const TelemetryColumn *columns, size_t cou
 
 // --------------------------------------------------------------------- loop --
 
-void Telemetry::update(uint32_t now_ms) {
+void Telemetry::update(uint32_t now_ms, bool transmit) {
   if (!radio_) {
     return;
   }
 
   pollCommands();
+  if (!transmit) {
+    pendingReplyCmd_ = nullptr;  // a reply now would be a transmission
+    headerDue_ = true;           // the first thing sent once allowed again
+    lastRow_ = now_ms;
+    return;
+  }
 
   if (now_ms - lastHeader_ >= HEADER_PERIOD_MS) {
     headerDue_ = true;

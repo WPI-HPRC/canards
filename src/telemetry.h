@@ -97,7 +97,9 @@ public:
 
   // Call every loop(). Never blocks waiting for the radio: when the module is
   // busy (AUX low) the row is skipped and counted in rowsSkipped().
-  void update(uint32_t now_ms = millis());
+  // `transmit` false: commands are still read and run, but nothing is sent
+  // (main.cpp keeps the radio quiet while a USB host is connected).
+  void update(uint32_t now_ms = millis(), bool transmit = true);
 
   bool active() const { return radio_ != nullptr; }
   uint32_t rowsSent() const { return rowsSent_; }

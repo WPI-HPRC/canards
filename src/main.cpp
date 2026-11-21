@@ -55,6 +55,9 @@
 #include <Arduino.h>
 #include <IWatchdog.h>
 
+#include "usbd_cdc.h"  // hUSBD_Device_CDC: is a computer on USB? (radioMayTransmit)
+extern "C" USBD_HandleTypeDef hUSBD_Device_CDC;
+
 #include <cstdlib>
 #include <cstring>
 
@@ -401,6 +404,20 @@ bool runCycle() {
   return true;
 }
 
+// --- Radio vs USB --------------------------------------------------------------------
+// The E22's 33 dBm bursts break the USB link on the bench. The radio sends only
+// when no computer has enumerated the board (USB state "configured"), no host
+// has the port open (DTR), and the first kRadioQuietAfterBootMs are over, so a
+// computer plugged in at boot can enumerate before the first burst. In flight
+// there is no USB cable: the radio starts kRadioQuietAfterBootMs after power-up.
+constexpr uint32_t kRadioQuietAfterBootMs = 5000;
+
+bool radioMayTransmit() {
+  if (millis() < kRadioQuietAfterBootMs) return false;
+  if (SerialUSB.dtr()) return false;
+  return hUSBD_Device_CDC.dev_state != USBD_STATE_CONFIGURED;
+}
+
 // --- Canard identification (USB console, on the ground only) -----------------------
 //   canard <which> <deg>   hold one canard at <deg> for 5 s (kGroundTestHoldUs)
 //   canard off             all back to neutral now
@@ -651,11 +668,10 @@ void setup() {
   if (initializeSD()) sdLog.begin(sdLogFile());
   sensors.begin();
   actuators.begin();
-  // RADIO DISABLED (2026-11-21): the E22 at 33 dBm is the suspect for USB
-  // dropping whenever DC power is on. Nothing is configured or sent over the
-  // radio; telemetry and commands are USB only. To re-enable, uncomment this
-  // line and the telemetry.begin() line below.
-  // const bool radioOk = radioLinkBegin();
+  // The E22 transmits at 33 dBm. On the bench its bursts knocked out the USB
+  // link whenever DC power was on, so the radio stays quiet while a computer
+  // is on USB: see radioMayTransmit(). With no USB (the pad, the flight) it sends.
+  const bool radioOk = radioLinkBegin();
 
   boot = selectBootMode();
   const char* why = "";
@@ -675,8 +691,7 @@ void setup() {
   // ground station can watch a replay over USB). Commands are read in Flight
   // only. Stream mode owns the USB port, so no console there.
   if (boot.mode != BootMode::Stream) console.begin(tlmColumns);
-  // RADIO DISABLED: without begin() the radio telemetry never sends.
-  // telemetry.begin(radioLink(), tlmColumns, radioOk);
+  telemetry.begin(radioLink(), tlmColumns, radioOk);
 
   switch (boot.mode) {
     case BootMode::Flight:
@@ -706,7 +721,8 @@ void loop() {
     case BootMode::Stream: loopStream(); break;
   }
 
-  telemetry.update();
+  // Radio quiet while a computer is on USB: see radioMayTransmit().
+  telemetry.update(millis(), radioMayTransmit());
 
   // Heartbeat: about 2 Hz.
   static uint32_t lastBlinkMs = 0;
