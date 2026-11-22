@@ -40,6 +40,8 @@ bool changeSerialPortConfig(RadioConfigTypes::SerialSpeeds baudRate, RadioConfig
 
 LoRaE22& radioLink() { return gRadio; }
 
+int radioTxRoom() { return gRadioSerial.availableForWrite(); }
+
 bool radioLinkBegin() {
   RadioConfig config;
   config.address = ADDRESS;

@@ -69,9 +69,10 @@ void Telemetry::update(uint32_t now_ms, bool transmit) {
 
   pollCommands();
   if (!transmit) {
-    pendingReplyCmd_ = nullptr;  // a reply now would be a transmission
-    headerDue_ = true;           // the first thing sent once allowed again
-    lastRow_ = now_ms;
+    // Held back (USB connected, or the UART has no room for a whole line):
+    // send nothing. A due row or header goes out once allowed again; the
+    // header repeats every HEADER_PERIOD_MS anyway.
+    pendingReplyCmd_ = nullptr;  // a stale reply later would mislead
     return;
   }
 

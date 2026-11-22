@@ -279,6 +279,7 @@ const TelemetryColumn tlmColumns[] = {
     TLM_UINT("imu_missed", sensors.missedSamples()),
     TLM_UINT("log_rows", sdLog.rowsWritten()),
     TLM_UINT("log_drop", sdLog.dropped()),
+    TLM_UINT("radio_room", static_cast<unsigned>(radioTxRoom() < 0 ? 0 : radioTxRoom())),  // UART tx bytes free; >= 932 to send
     TLM_UINT("sensor_ok", sensors.status().lsm | sensors.status().lis << 1 | sensors.status().lps << 2 |
                               sdLog.active() << 3),
 };
@@ -441,8 +442,15 @@ bool runCycle() {
 // there is no USB cable: the radio starts kRadioQuietAfterBootMs after power-up.
 constexpr uint32_t kRadioQuietAfterBootMs = 5000;
 
+// A telemetry line (<= Telemetry::MAX_LINE, in <= 4 framed chunks) is handed
+// to the radio UART only when its transmit buffer can take all of it, so a
+// write never blocks the loop. On the pad (log 56) blocking writes stalled the
+// loop ~150 ms every row. A row that does not fit is skipped, not waited for.
+constexpr int kRadioLineRoom = static_cast<int>(Telemetry::MAX_LINE) + 32;
+
 bool radioMayTransmit() {
   if (millis() < kRadioQuietAfterBootMs) return false;
+  if (radioTxRoom() < kRadioLineRoom) return false;
   if (SerialUSB.dtr()) return false;
   return hUSBD_Device_CDC.dev_state != USBD_STATE_CONFIGURED;
 }
